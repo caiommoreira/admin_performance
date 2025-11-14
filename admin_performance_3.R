@@ -16,6 +16,11 @@ suppressPackageStartupMessages({
   library(highcharter)
   library(jsonlite)
   library(mongolite)
+  library(ggplot2)
+  library(forcats)
+  library(scales)
+  library(ggimage)
+  library(plotly)
 })
 
 is_local <- 1
@@ -424,6 +429,130 @@ monthly_with_totals <- function(out, month_label = "Mês") {
   out2
 }
 
+emoji_img <- function(filename, size = 18) {
+  # filename ex.: "feliz.png" ou "feliz.svg"
+  sprintf(
+    "<img src='%s' style='height:%dpx;vertical-align:-3px;margin-right:6px;'>",
+    filename, as.integer(size)
+  )
+}
+
+# ---- cache ------
+
+.cache_env <- new.env(parent = emptyenv())
+
+CACHE_TTL <- 60 * 5  # 5 minutos; ajustável
+
+.cache_now <- function() as.numeric(Sys.time())
+
+cache_key <- function(prefix, ..., inst_id = NULL, group_id = NULL, user_id = NULL, extra = NULL) {
+  parts <- c(
+    prefix,
+    if (!is.null(inst_id)) paste0("inst=", inst_id),
+    if (!is.null(group_id)) paste0("grp=", group_id),
+    if (!is.null(user_id)) paste0("usr=", user_id),
+    if (!is.null(extra))   paste0("x=",   extra),
+    # inclui is_debug/is_local para evitar reuso indevido entre ambientes
+    paste0("dbg=", is_debug),
+    paste0("loc=", is_local)
+  )
+  paste(parts, collapse = "|")
+}
+
+cache_set <- function(key, value, ttl = CACHE_TTL) {
+  assign(key, list(value = value, expires = .cache_now() + ttl), envir = .cache_env)
+  invisible(TRUE)
+}
+
+cache_get <- function(key) {
+  if (!exists(key, envir = .cache_env, inherits = FALSE)) return(NULL)
+  obj <- get(key, envir = .cache_env, inherits = FALSE)
+  if (!is.list(obj) || is.null(obj$expires) || is.null(obj$value)) return(NULL)
+  if (.cache_now() > obj$expires) {
+    # expirou → remove e retorna NULL
+    rm(list = key, envir = .cache_env)
+    return(NULL)
+  }
+  obj$value
+}
+
+cache_has <- function(key) {
+  !is.null(cache_get(key))
+}
+
+cache_clear <- function(prefix = NULL) {
+  if (is.null(prefix)) {
+    rm(list = ls(envir = .cache_env, all.names = TRUE), envir = .cache_env)
+    return(invisible(TRUE))
+  }
+  ks <- ls(envir = .cache_env, all.names = TRUE)
+  ks <- ks[startsWith(ks, prefix)]
+  if (length(ks)) rm(list = ks, envir = .cache_env)
+  invisible(TRUE)
+}
+
+.MINIGAMES_MEMO <- new.env(parent = emptyenv())
+
+memo_get_minigames <- function(key, loader_fn) {
+  if (exists(key, envir = .MINIGAMES_MEMO, inherits = FALSE)) {
+    return(get(key, envir = .MINIGAMES_MEMO, inherits = FALSE))
+  }
+  val <- loader_fn()
+  assign(key, val, envir = .MINIGAMES_MEMO)
+  val
+}
+
+minigames_cache_key <- function(inst_id, group_choice) {
+  sprintf("inst=%s|group=%s", as.character(inst_id %||% "NA"), as.character(group_choice %||% "ALL"))
+}
+
+get_moove_scores_data_cached <- function(sel_users, inst_id, group_choice) {
+  if (length(sel_users) == 0) return(tibble::tibble())
+  key <- paste0("minigames:moove_scores:", minigames_cache_key(inst_id, group_choice))
+  memo_get_minigames(key, function() get_moove_scores_data(sel_users))
+}
+
+get_user_settings_avg_percentiles_cached <- function(sel_users, inst_id, group_choice) {
+  if (length(sel_users) == 0) return(tibble::tibble())
+  key <- paste0("minigames:avg_percentiles:", minigames_cache_key(inst_id, group_choice))
+  memo_get_minigames(key, function() get_user_settings_avg_percentiles(sel_users))
+}
+
+.MEASURES_MEMO <- new.env(parent = emptyenv())
+
+memo_get_measures <- function(key, loader_fn) {
+  if (exists(key, envir = .MEASURES_MEMO, inherits = FALSE)) {
+    return(get(key, envir = .MEASURES_MEMO, inherits = FALSE))
+  }
+  val <- loader_fn()
+  assign(key, val, envir = .MEASURES_MEMO)
+  val
+}
+
+measures_cache_key <- function(inst_id, group_choice) {
+  sprintf("inst=%s|group=%s", as.character(inst_id %||% "NA"), as.character(group_choice %||% "ALL"))
+}
+
+get_measurement_summaries_cached <- function(sel_users, inst_id, group_choice) {
+  if (length(sel_users) == 0) return(tibble::tibble())
+  key <- paste0("measures:summaries:", measures_cache_key(inst_id, group_choice))
+  memo_get_measures(key, function() get_measurement_summaries(sel_users))
+}
+
+memo_clear_env <- function(env) {
+  if (is.environment(env)) rm(list = ls(env, all.names = TRUE), envir = env)
+}
+
+memo_clear_all <- function() {
+  # se você nomeou os memos assim; ajuste se os nomes diferirem
+  if (exists(".MINIGAMES_MEMO",   inherits = FALSE)) memo_clear_env(.MINIGAMES_MEMO)
+  if (exists(".PERC_MEMO",        inherits = FALSE)) memo_clear_env(.PERC_MEMO)
+  if (exists(".MEASURES_MEMO",    inherits = FALSE)) memo_clear_env(.MEASURES_MEMO)
+}
+
+RESPS_TTL <- 15 * 60  # 15 min
+.resps_cache_env <- new.env(parent = emptyenv())
+
 # ---- evals -----------
 
 eval_metric_spec <- function(key) {
@@ -755,6 +884,126 @@ to_millis <- function(x_date) {
   highcharter::datetime_to_timestamp(x_date)
 }
 
+# ---- answers ----
+
+answers_dist_two_pops <- function(df,question_id,pop1_uids, pop1_label,pop2_uids, pop2_label,use_emoji_paths = TRUE,emojis_subdir  = "emojis") {
+  
+  df_q_base <- df %>%
+    dplyr::filter(
+      .data$question_id == !!as.numeric(question_id),
+      .data$did_not_answer == 0L
+    )
+  
+  if (!nrow(df_q_base)) {
+    return(list(
+      data = tibble::tibble(),
+      meta = list(
+        pop1_label = pop1_label,
+        pop2_label = pop2_label,
+        n1_resp    = 0L,
+        n1_users   = 0L,
+        n2_resp    = 0L,
+        n2_users   = 0L
+      )
+    ))
+  }
+  
+  make_block <- function(uids, label) {
+    if (is.null(uids) || !length(uids)) {
+      return(tibble::tibble(
+        label_cat       = character(),
+        question_answer = character(),
+        question_emoji  = character(),
+        n               = integer(),
+        grupo           = character()
+      ))
+    }
+    df_sub <- df_q_base %>%
+      dplyr::filter(.data$user_id %in% !!as.integer(uids))
+    
+    if (!nrow(df_sub)) {
+      return(tibble::tibble(
+        label_cat       = character(),
+        question_answer = character(),
+        question_emoji  = character(),
+        n               = integer(),
+        grupo           = character()
+      ))
+    }
+    
+    # se tiver texto, conta por texto+emoji; se não, por emoji
+    if ("question_answer" %in% names(df_sub) &&
+        any(nzchar(df_sub$question_answer))) {
+      df_sub %>%
+        dplyr::count(question_emoji, question_answer, name = "n") %>%
+        dplyr::mutate(
+          label_cat = question_answer,
+          grupo     = label
+        )
+    } else {
+      df_sub %>%
+        dplyr::count(question_emoji, name = "n") %>%
+        dplyr::mutate(
+          question_answer = "",
+          label_cat       = question_emoji,
+          grupo           = label
+        )
+    }
+  }
+  
+  block1 <- make_block(pop1_uids, pop1_label)
+  block2 <- make_block(pop2_uids, pop2_label)
+  
+  df_out <- dplyr::bind_rows(block1, block2)
+  if (!nrow(df_out)) {
+    return(list(
+      data = tibble::tibble(),
+      meta = list(
+        pop1_label = pop1_label,
+        pop2_label = pop2_label,
+        n1_resp    = 0L,
+        n1_users   = 0L,
+        n2_resp    = 0L,
+        n2_users   = 0L
+      )
+    ))
+  }
+  
+  df_out <- df_out %>%
+    dplyr::group_by(grupo) %>%
+    dplyr::mutate(pct = n / sum(n)) %>%
+    dplyr::ungroup()
+  
+  # caminho dos emojis na pasta www/emojis (arquivo físico)
+  if (use_emoji_paths && "question_emoji" %in% names(df_out)) {
+    df_out <- df_out %>%
+      dplyr::mutate(
+        img = dplyr::if_else(
+          nzchar(question_emoji),
+          file.path("www", emojis_subdir, paste0(question_emoji, ".png")),
+          NA_character_
+        )
+      )
+  } else {
+    df_out$img <- NA_character_
+  }
+  
+  # métricas para caption
+  pop1_df <- df_q_base %>% dplyr::filter(.data$user_id %in% !!as.integer(pop1_uids))
+  pop2_df <- df_q_base %>% dplyr::filter(.data$user_id %in% !!as.integer(pop2_uids))
+  
+  meta <- list(
+    pop1_label = pop1_label,
+    pop2_label = pop2_label,
+    n1_resp    = nrow(pop1_df),
+    n1_users   = dplyr::n_distinct(pop1_df$user_id),
+    n2_resp    = nrow(pop2_df),
+    n2_users   = dplyr::n_distinct(pop2_df$user_id)
+  )
+  
+  list(data = df_out, meta = meta)
+}
+
 # --------------------- UI() ---------------------------------
 
 ui <- fluidPage(
@@ -873,7 +1122,27 @@ ui <- fluidPage(
                     ),
                     br(),
                     uiOutput("ui_mm_detail")
+                  ),
+                  
+                  # ---- answers ----
+                  
+                  tabPanel(
+                    "Respostas",
+                    br(),
+                    fluidRow(align = "center",
+                      column(6,align = "center",uiOutput("ui_resp_question")),
+                      column(3,align = "center",uiOutput("ui_resp_groups")),
+                      column(3,align = "center",uiOutput("ui_resp_user"))
+                    ),
+                    br(),
+                    fluidRow(
+                      column(
+                        12,
+                        plotOutput("plt_resp", height = "460px")
+                      )
+                    )
                   )
+                  
                   
                   # ---- end -----
       )
@@ -946,21 +1215,43 @@ server <- function(input, output, session) {
     as.integer(scope_user_ids())
   })
   
+  # ---- cache -----
+  
+  EVAL_CACHE_PREFIX <- "EVAL"
+  
+  eval_cache_key <- function(suffix = NULL, inst_id = NULL, gid = NULL, uid = NULL, metric = NULL, extra = NULL) {
+    cache_key(
+      prefix   = paste0(EVAL_CACHE_PREFIX, "|", suffix %||% ""),
+      inst_id  = inst_id,
+      group_id = gid,
+      user_id  = uid,
+      extra    = paste0(metric %||% "", if (!is.null(extra)) paste0("|", extra) else "")
+    )
+  }
+  
+  ANS_CACHE_PREFIX <- "ANS"
+  
   # ---- evals -----
   
   evals_joined <- reactive({
     req(authed(), session_role() == "institution", input$tabs == "Avaliações")
+    inst_id <- req(selected_institution_id())
     
-    # carrega as tabelas somente quando a aba 'Avaliações' é aberta
+    # tenta o cache
+    ck <- eval_cache_key("joined", inst_id = inst_id)
+    cached <- cache_get(ck)
+    if (!is.null(cached)) return(cached)
+    
+    # ---------- (código original a partir daqui, sem mudanças de lógica) ----------
     rdcs_tbl   <- tbl(pool, "rdcs")
     rdc_vs_tbl <- tbl(pool, "rdc_vs")
     
     uids <- scope_user_ids()
     if (length(uids) == 0) {
-      return(tibble::tibble())
+      out <- tibble::tibble()
+      cache_set(ck, out); return(out)
     }
     
-    # 1) rdcs (filtrar por users da instituição)
     rdcs_df <- rdcs_tbl %>%
       filter(.data$user_id %in% !!as.integer(uids)) %>%
       select(id, external_id, order_id, score_id, evaluation_date, user_id, session,
@@ -968,21 +1259,17 @@ server <- function(input, output, session) {
              impulsivity_control, stamp, analysis_version, age, weight, height, sex,
              institution_id, created_at, available) %>%
       collect()
+    if (!nrow(rdcs_df)) { out <- tibble::tibble(); cache_set(ck, out); return(out) }
     
-    if (!nrow(rdcs_df)) return(tibble::tibble())
-    
-    # 2) rdc_vs (peripheral_vision) apenas para os ids coletados
     vs_df <- rdc_vs_tbl %>%
       filter(.data$rdc_id %in% !!as.integer(rdcs_df$id)) %>%
       select(rdc_id, peripheral_vision) %>%
       collect()
     
-    # join e -1 quando não existir
     rdcs_vs <- rdcs_df %>%
       left_join(vs_df, by = c("id" = "rdc_id")) %>%
       mutate(peripheral_vision = dplyr::coalesce(peripheral_vision, -1))
     
-    # 3) nomes (Q37) e DOB (Q30) → idade na data da avaliação
     nm_df  <- get_names_for_users(unique(rdcs_vs$user_id))
     dob_df <- get_dobs_for_users(unique(rdcs_vs$user_id))
     
@@ -991,10 +1278,9 @@ server <- function(input, output, session) {
       left_join(dob_df, by = "user_id") %>%
       mutate(
         name = dplyr::coalesce(name, paste0("user_", user_id)),
-        age_on_eval = compute_age_on_date(dob, as.Date(evaluation_date))  # <-- mantém este nome de função
+        age_on_eval = compute_age_on_date(dob, as.Date(evaluation_date))
       )
     
-    # 4) grupos (user_groups) → nomes via groups_from_api()
     g_api <- groups_from_api()
     ug <- user_groups %>%
       filter(.data$user_id %in% !!as.integer(unique(rdcs_enriched$user_id))) %>%
@@ -1012,8 +1298,9 @@ server <- function(input, output, session) {
       rdcs_enriched$groups <- NA_character_
     }
     
-    # 5) ordenar por data desc / user_id
-    rdcs_enriched %>% arrange(desc(evaluation_date), user_id)
+    out <- rdcs_enriched %>% arrange(desc(evaluation_date), user_id)
+    cache_set(ck, out)
+    out
   })
   
   eval_view_mode <- reactiveVal("groups")
@@ -1027,20 +1314,22 @@ server <- function(input, output, session) {
   })
   
   eval_group_stats <- reactive({
-    
     req(authed(), session_role() == "institution", input$tabs == "Avaliações")
     key  <- eval_metric_key()
+    inst_id <- req(selected_institution_id())
+    
+    ck <- eval_cache_key("group_stats", inst_id = inst_id, metric = key)
+    if (!is.null(cache_get(ck))) return(cache_get(ck))
+    
     spec <- eval_metric_spec(key)
     d <- evals_joined()
-    if (!nrow(d)) return(tibble::tibble(group_id = integer(), group_name = character(), value = numeric()))
+    if (!nrow(d)) { out <- tibble::tibble(group_id = integer(), group_name = character(), value = numeric()); cache_set(ck, out); return(out) }
     if (key == "peripheral_vision") d <- d %>% dplyr::mutate(peripheral_vision = ifelse(peripheral_vision < 0, NA_real_, peripheral_vision))
     
-    # 1) média por usuário (evita multiplicar avaliações na junção com grupos)
     d_user <- d %>%
       dplyr::group_by(user_id) %>%
       dplyr::summarise(value = mean(.data[[key]], na.rm = TRUE), .groups = "drop")
     
-    # 2) mapeia usuários -> grupos (somente grupos da instituição)
     g_api <- groups_from_api()
     ug <- user_groups %>%
       dplyr::filter(.data$user_id %in% !!as.integer(d_user$user_id)) %>%
@@ -1048,42 +1337,49 @@ server <- function(input, output, session) {
       dplyr::distinct() %>%
       dplyr::collect()
     
-    if (!nrow(ug) || !nrow(g_api)) return(tibble::tibble(group_id = integer(), group_name = character(), value = numeric()))
+    if (!nrow(ug) || !nrow(g_api)) { out <- tibble::tibble(group_id = integer(), group_name = character(), value = numeric()); cache_set(ck, out); return(out) }
     
     ug_named <- ug %>%
       dplyr::inner_join(g_api %>% dplyr::rename(group_id = id, group_name = name), by = "group_id")
     
-    # 3) junta (user média) x (grupos) → média por grupo
-    d_user %>%
-      dplyr::left_join(ug_named, by = "user_id", relationship = "many-to-many") %>% # agora é esperado
+    out <- d_user %>%
+      dplyr::left_join(ug_named, by = "user_id", relationship = "many-to-many") %>%
       dplyr::group_by(group_id, group_name) %>%
-      dplyr::summarise(value = mean(value, na.rm = TRUE), .groups = "drop") %>% filter(group_name != "" & !is.na(group_name))
+      dplyr::summarise(value = mean(value, na.rm = TRUE), .groups = "drop") %>%
+      dplyr::filter(group_name != "" & !is.na(group_name))
+    
+    cache_set(ck, out)
+    out
   })
   
   eval_user_stats <- reactive({
-    
     req(authed(), session_role() == "institution", input$tabs == "Avaliações")
     gid  <- eval_selected_group(); req(!is.na(gid))
     key  <- eval_metric_key()
+    inst_id <- req(selected_institution_id())
+    
+    ck <- eval_cache_key("user_stats", inst_id = inst_id, gid = gid, metric = key)
+    if (!is.null(cache_get(ck))) return(cache_get(ck))
+    
     spec <- eval_metric_spec(key)
     d <- evals_joined()
-    if (!nrow(d)) return(tibble::tibble(user_id = integer(), name = character(), value = numeric()))
+    if (!nrow(d)) { out <- tibble::tibble(user_id = integer(), name = character(), value = numeric()); cache_set(ck, out); return(out) }
     if (key == "peripheral_vision") d <- d %>% dplyr::mutate(peripheral_vision = ifelse(peripheral_vision < 0, NA_real_, peripheral_vision))
     
-    # usuários do grupo (distinct)
     ug_users <- user_groups %>%
       dplyr::filter(.data$group_id == !!as.integer(gid)) %>%
       dplyr::transmute(user_id = as.integer(.data$user_id)) %>%
       dplyr::distinct() %>%
       dplyr::collect()
+    if (!nrow(ug_users)) { out <- tibble::tibble(user_id = integer(), name = character(), value = numeric()); cache_set(ck, out); return(out) }
     
-    if (!nrow(ug_users)) return(tibble::tibble(user_id = integer(), name = character(), value = numeric()))
-    
-    # média por usuário, já com nome
-    d %>%
+    out <- d %>%
       dplyr::filter(.data$user_id %in% ug_users$user_id) %>%
       dplyr::group_by(user_id, name) %>%
       dplyr::summarise(value = mean(.data[[key]], na.rm = TRUE), .groups = "drop")
+    
+    cache_set(ck, out)
+    out
   })
   
   eval_selected_user  <- reactiveVal(NA_integer_)
@@ -1094,23 +1390,27 @@ server <- function(input, output, session) {
     req(authed(), session_role() == "institution", input$tabs == "Avaliações")
     uid  <- req(eval_selected_user())
     key  <- eval_metric_key()
-    spec <- eval_metric_spec(key)
+    inst_id <- req(selected_institution_id())
     
+    ck <- eval_cache_key("user_ts", inst_id = inst_id, uid = uid, metric = key)
+    cached <- cache_get(ck)
+    if (!is.null(cached)) return(cached)
+    
+    spec <- eval_metric_spec(key)
     d <- evals_joined()
     if (!nrow(d)) {
-      return(tibble::tibble(
+      out <- tibble::tibble(
         evaluation_date = as.Date(character()),
         score_id        = character(),
         value           = numeric(),
         reference_mean  = numeric(),
         reference_sd    = numeric()
-      ))
+      )
+      cache_set(ck, out); return(out)
     }
     
-    # keep peripheral_vision visible but handle -1 as NA
     if (key == "peripheral_vision") {
-      d <- d %>%
-        mutate(peripheral_vision = ifelse(peripheral_vision < 0, NA_real_, peripheral_vision))
+      d <- d %>% mutate(peripheral_vision = ifelse(peripheral_vision < 0, NA_real_, peripheral_vision))
     }
     
     d_user <- d %>%
@@ -1122,7 +1422,6 @@ server <- function(input, output, session) {
       ) %>%
       arrange(evaluation_date)
     
-    # join with reference stats only if metric == "nrss"
     if (identical(key, "nrss")) {
       df_full <- get_user_detailed_evals(uid)
       refs <- df_full %>%
@@ -1134,13 +1433,12 @@ server <- function(input, output, session) {
         )
       d_user <- d_user %>% left_join(refs, by = c("evaluation_date", "score_id"))
     } else {
-      d_user <- d_user %>%
-        mutate(reference_mean = NA_real_, reference_sd = NA_real_)
+      d_user <- d_user %>% mutate(reference_mean = NA_real_, reference_sd = NA_real_)
     }
     
-    # clamp user values only, not reference
     d_user$value <- pmin(pmax(d_user$value, spec$bounds[1]), spec$bounds[2])
     
+    cache_set(ck, d_user)
     d_user
   })
   
@@ -1297,8 +1595,10 @@ server <- function(input, output, session) {
   
   minigames_df <- reactive({
     req(authed(), session_role() == "institution", input$tabs == "Minigames")
-    uids <- scope_user_ids()  # já existente: todos os users da legal_entity
-    get_moove_scores_data(uids)  # retorna user_id, date_time (UTC), minigame_id
+    uids     <- scope_user_ids()
+    inst_id  <- selected_institution_id()
+    choice   <- input$sel_group %||% "ALL"
+    get_moove_scores_data_cached(uids, inst_id, choice)
   })
   
   mg_view_mode <- reactiveVal("groups")
@@ -1372,9 +1672,11 @@ server <- function(input, output, session) {
   
   percentiles_long <- reactive({
     req(authed(), session_role() == "institution")
-    uids <- scope_user_ids()
-    dfw  <- get_user_settings_avg_percentiles(uids)
-    to_long_percentiles(dfw)  # colunas: user_id, capacity, value, capacity_label
+    uids     <- scope_user_ids()
+    inst_id  <- selected_institution_id()
+    choice   <- input$sel_group %||% "ALL"
+    dfw <- get_user_settings_avg_percentiles_cached(uids, inst_id, choice)
+    to_long_percentiles(dfw)
   })
   
   perf_view_mode   <- reactiveVal("groups")
@@ -1427,8 +1729,10 @@ server <- function(input, output, session) {
   
   mm_df <- reactive({
     req(authed(), session_role() == "institution", input$tabs == "Medidas Moove")
-    uids <- scope_user_ids()
-    get_measurement_summaries(uids)
+    inst_id <- selected_institution_id()
+    choice  <- input$sel_group %||% "ALL"
+    uids    <- scope_user_ids()
+    get_measurement_summaries_cached(uids, inst_id, choice)
   })
   
   mm_metric_id <- reactive({
@@ -1669,6 +1973,275 @@ server <- function(input, output, session) {
       )
     
     df
+  })
+  
+  # ---- answers ----
+  
+  ans_questions <- reactive({
+    req(authed(), session_role() == "institution")
+    inst_id <- selected_institution_id(); req(inst_id)
+    
+    ck <- cache_key(
+      prefix   = ANS_CACHE_PREFIX,
+      inst_id  = inst_id,
+      extra    = "questions"
+    )
+    cached <- cache_get(ck)
+    if (!is.null(cached)) return(cached)
+    
+    questions_tbl         <- tbl(pool, "questions")
+    template_questions_tbl <- tbl(pool, "template_questions")
+    
+    df <- template_questions_tbl %>%
+      dplyr::filter(template_id %in% 1:6) %>%              # mantém a lógica dos templates 1–6
+      dplyr::select(question_id) %>%
+      dplyr::distinct() %>%
+      dplyr::inner_join(
+        questions_tbl,
+        by = c("question_id" = "id")
+      ) %>%
+      dplyr::select(
+        question_id,
+        question = title
+      ) %>%
+      dplyr::mutate(question_id = as.numeric(question_id)) %>%
+      dplyr::arrange(question) %>%
+      dplyr::collect()
+    
+    cache_set(ck, df)
+    df
+  })
+  
+  ans_base <- reactive({
+    req(authed(), session_role() == "institution")
+    inst_id <- selected_institution_id(); req(inst_id)
+    
+    ck <- cache_key(
+      prefix   = ANS_CACHE_PREFIX,
+      inst_id  = inst_id,
+      extra    = "base"
+    )
+    cached <- cache_get(ck)
+    if (!is.null(cached)) return(cached)
+    
+    # perguntas válidas (templates 1–6)
+    q_df <- ans_questions()
+    if (!nrow(q_df)) {
+      out <- tibble::tibble()
+      cache_set(ck, out); return(out)
+    }
+    q_ids <- as.numeric(q_df$question_id)
+    
+    # todos os usuários da instituição (sem limitar ao grupo ainda)
+    inst_uids <- get_user_ids_for_institution_or_group(inst_id, "ALL")
+    if (!length(inst_uids)) {
+      out <- tibble::tibble()
+      cache_set(ck, out); return(out)
+    }
+    
+    user_question_answers_tbl <- tbl(pool, "user_question_answers")
+    question_answers_tbl      <- tbl(pool, "question_answers")
+    questions_tbl             <- tbl(pool, "questions")
+    
+    # respostas brutas dos usuários da instituição para as perguntas de interesse
+    uqa_raw <- user_question_answers_tbl %>%
+      dplyr::filter(
+        .data$question_id %in% !!as.integer(q_ids),
+        .data$user_id     %in% !!as.integer(inst_uids)
+      ) %>%
+      dplyr::select(
+        user_id,
+        question_id,
+        question_answer_id,
+        did_not_answer
+      ) %>%
+      dplyr::collect()
+    
+    if (!nrow(uqa_raw)) {
+      out <- tibble::tibble()
+      cache_set(ck, out); return(out)
+    }
+    
+    # ids numéricos, como no script do relatório
+    uqa_raw <- uqa_raw %>%
+      dplyr::mutate(
+        question_id        = as.numeric(question_id),
+        question_answer_id = suppressWarnings(
+          as.numeric(gsub("[^0-9]", "", as.character(question_answer_id)))
+        )
+      )
+    
+    # lookups (answer + emoji, texto da pergunta)
+    qa_lookup <- question_answers_tbl %>%
+      dplyr::select(id, question_id, title, image) %>%
+      dplyr::collect() %>%
+      dplyr::mutate(
+        id          = as.numeric(id),
+        question_id = as.numeric(question_id)
+      ) %>%
+      dplyr::distinct(id, question_id, .keep_all = TRUE)
+    
+    q_lookup <- questions_tbl %>%
+      dplyr::select(id, title) %>%
+      dplyr::collect() %>%
+      dplyr::rename(
+        question_id = id,
+        question    = title
+      ) %>%
+      dplyr::mutate(question_id = as.numeric(question_id))
+    
+    # reconstrói base enriquecida com texto da pergunta, resposta e emoji
+    df <- uqa_raw %>%
+      dplyr::select(
+        user_id,
+        question_id,
+        question_answer_id,
+        did_not_answer
+      ) %>%
+      dplyr::left_join(
+        qa_lookup,
+        by = c("question_id" = "question_id",
+               "question_answer_id" = "id")
+      ) %>%
+      dplyr::rename(
+        question_answer = title,
+        question_emoji  = image
+      ) %>%
+      dplyr::left_join(q_lookup, by = "question_id") %>%
+      dplyr::mutate(
+        question_answer = dplyr::coalesce(question_answer, ""),
+        question_emoji  = dplyr::coalesce(question_emoji, ""),
+        question        = dplyr::coalesce(question, "")
+      )
+    
+    cache_set(ck, df)
+    df
+  })
+  
+  ans_dist_two_pops <- reactive({
+    req(authed(), session_role() == "institution")
+    
+    df <- ans_base()
+    req(is.data.frame(df), nrow(df) > 0)
+    
+    inst_id <- selected_institution_id()
+    req(inst_id)
+    
+    # ---------------------------------------------
+    # 1. ID da pergunta selecionada
+    # ---------------------------------------------
+    qid <- req(input$resp_question)
+    qid <- as.numeric(qid)
+    
+    df_q <- df %>%
+      dplyr::filter(
+        .data$question_id == !!qid,
+        did_not_answer == 0,
+        nzchar(question_answer)
+      )
+    
+    if (!nrow(df_q)) {
+      return(tibble::tibble(
+        grupo = character(),
+        label = character(),
+        img   = character(),
+        pct   = numeric(),
+        n     = integer()
+      ))
+    }
+    
+    # ---------------------------------------------
+    # 2. Usuários da instituição inteira
+    # ---------------------------------------------
+    inst_users <- get_user_ids_for_institution_or_group(inst_id, "ALL")
+    
+    # ---------------------------------------------
+    # 3. Usuários do grupo selecionado
+    # ---------------------------------------------
+    group_choice <- input$resp_group %||% "ALL"
+    group_users  <- get_user_ids_for_institution_or_group(inst_id, group_choice)
+    
+    # ---------------------------------------------
+    # 4. Usuário individual ou não?
+    #    "ALL_GROUP" → Grupo vs Instituição
+    #    user_id     → Usuário vs Grupo
+    # ---------------------------------------------
+    user_choice <- input$resp_user %||% "ALL_GROUP"
+    
+    if (identical(user_choice, "ALL_GROUP") || !nzchar(as.character(user_choice))) {
+      
+      # Caso padrão → Grupo vs Instituição
+      pop1_users <- as.integer(group_users)
+      pop2_users <- as.integer(inst_users)
+      pop1_label <- "Grupo"
+      pop2_label <- "Instituição"
+      
+    } else {
+      
+      # Caso detalhado → Usuário vs Grupo
+      uid        <- as.integer(user_choice)
+      pop1_users <- uid
+      pop2_users <- as.integer(group_users)
+      pop1_label <- "Usuário"
+      pop2_label <- "Grupo"
+    }
+    
+    # restringe a base só aos usuários usados na comparação
+    keep_ids <- unique(c(pop1_users, pop2_users))
+    df_q <- df_q %>% dplyr::filter(.data$user_id %in% !!keep_ids)
+    
+    if (!nrow(df_q)) {
+      return(tibble::tibble(
+        grupo = character(),
+        label = character(),
+        img   = character(),
+        pct   = numeric(),
+        n     = integer()
+      ))
+    }
+    
+    # ---------------------------------------------
+    # Função interna para montar distribuição
+    # ---------------------------------------------
+    make_dist <- function(uids, label_group) {
+      if (is.null(uids) || !length(uids)) return(NULL)
+      
+      sub <- df_q %>%
+        dplyr::filter(.data$user_id %in% !!as.integer(uids),
+                      nzchar(question_answer))
+      
+      if (!nrow(sub)) return(NULL)
+      
+      sub %>%
+        dplyr::count(question_answer, question_emoji, name = "n") %>%
+        dplyr::mutate(
+          grupo = label_group,
+          pct   = n / sum(n),
+          label = question_answer,
+          img   = dplyr::if_else(
+            nzchar(question_emoji),
+            paste0("emojis/", question_emoji, ".png"),  # arquivo na pasta www/emojis
+            NA_character_
+          )
+        )
+    }
+    
+    df1 <- make_dist(pop1_users, pop1_label)
+    df2 <- make_dist(pop2_users, pop2_label)
+    
+    out <- dplyr::bind_rows(df1, df2)
+    
+    if (!nrow(out)) {
+      tibble::tibble(
+        grupo = character(),
+        label = character(),
+        img   = character(),
+        pct   = numeric(),
+        n     = integer()
+      )
+    } else {
+      out
+    }
   })
   
   # ===================== output =====================
@@ -3162,6 +3735,197 @@ server <- function(input, output, session) {
       }
     })
   
+  # ---- answers ----
+  
+  output$ui_resp_question <- renderUI({
+    df <- ans_questions()
+    
+    df <- df %>% filter(!question_id %in% c(12,15,18,35,36))
+    
+    if (!nrow(df)) return(NULL)
+    
+    selectInput(
+      "resp_question",
+      label = "Pergunta:",
+      choices = setNames(df$question_id, df$question),
+      selected = df$question_id[1],
+      width = "100%"
+    )
+  })
+  
+  output$ui_resp_groups <- renderUI({
+    inst <- institution_dt()
+    req(inst)
+    
+    # grupos vêm de inst$data$groups
+    groups_list <- inst$groups
+    
+    # names = ids, values = nomes
+    group_choices <- as.integer(names(groups_list))
+    names(group_choices) <- unlist(groups_list, use.names = FALSE)
+    
+    group_choices <- group_choices[order(names(group_choices))]
+    
+    selectInput(
+      "resp_group",
+      label = "Grupo:",
+      choices = group_choices,
+      selected = group_choices[1],
+      width = "100%"
+    )
+  })
+  
+  output$ui_resp_user <- renderUI({
+    req(input$resp_group)
+    
+    inst_id <- selected_institution_id()
+    gid     <- input$resp_group
+    
+    group_uids <- get_user_ids_for_institution_or_group(inst_id, gid)
+    
+    group_uids <- get_names_for_users(group_uids)
+    
+    choices_all <- c("Todos do grupo" = "ALL_GROUP")
+    
+    if (nrow(group_uids)>0) {
+      choices <- group_uids$user_id
+      names(choices) <- group_uids$name
+    }
+    
+    choices <- c(choices_all,choices)
+    
+    selectInput(
+      "resp_user",
+      label = "Usuário:",
+      choices = choices,
+      selected = "ALL_GROUP",
+      width = "100%"
+    )
+  })
+  
+  output$plt_resp <- renderPlot({
+    
+    df <- ans_dist_two_pops()
+    req(nrow(df) > 0)
+    
+    # -------------------------- nomes "bonitos" --------------------------
+    question_title <- ans_questions()$question[
+      ans_questions()$question_id == as.integer(input$resp_question)
+    ]
+    
+    inst_name   <- institution_dt()$institution_name %||% "Instituição"
+    
+    group_label <- unlist(institution_dt()$groups, use.names = FALSE)[
+      as.integer(names(institution_dt()$groups)) == as.integer(input$resp_group)
+    ] %||% "Grupo"
+    
+    if (is.null(input$resp_user) || input$resp_user == "ALL_GROUP") {
+      user_label <- "Todos do grupo"
+    } else {
+      user_label <- get_names_for_users(as.integer(input$resp_user))$name
+    }
+    
+    # -------------------------- limpeza básica --------------------------
+    df <- df %>%
+      dplyr::filter(!is.na(grupo))   # some com NA na legenda
+    
+    max_pct <- max(df$pct, na.rm = TRUE)
+    
+    # níveis fixos para o fill
+    values_all <- c(
+      "Grupo"       = "#93C5FD",  # azul acinzentado
+      "Instituição" = "#4B5563",  # cinza escuro
+      "Usuário"     = "#da4a11"   # azul para usuário
+    )
+    
+    df <- df %>%
+      dplyr::mutate(
+        grupo = factor(grupo, levels = names(values_all))
+      )
+    
+    # -------------------------- labels da legenda --------------------------
+    legend_labels <- character(0)
+    
+    if ("Grupo" %in% as.character(df$grupo)) {
+      legend_labels["Grupo"] <- paste0("Grupo: ", group_label)
+    }
+    if ("Instituição" %in% as.character(df$grupo)) {
+      legend_labels["Instituição"] <- paste0("Instituição: ", inst_name)
+    }
+    if ("Usuário" %in% as.character(df$grupo)) {
+      legend_labels["Usuário"] <- paste0("Usuário: ", user_label)
+    }
+    
+    used_levels <- intersect(names(values_all), as.character(unique(df$grupo)))
+    
+    # -------------------------- ggplot --------------------------
+    p <- ggplot(
+      df,
+      aes(
+        x    = forcats::fct_reorder(label, pct, .fun = max),
+        y    = pct,
+        fill = grupo
+      )
+    ) +
+      geom_col(position = position_dodge(width = 0.7)) +
+      coord_flip() +
+      geom_text(
+        aes(label = scales::percent(pct, accuracy = 0.1), group = grupo),
+        position = position_dodge(width = 0.7),
+        hjust    = -0.15,
+        size     = 4.5
+      ) +
+      scale_y_continuous(
+        labels = scales::percent_format(accuracy = 1),
+        limits = c(0, max_pct + 0.1)
+      ) +
+      scale_fill_manual(
+        values = values_all[used_levels],
+        breaks = used_levels,
+        labels = legend_labels[used_levels],
+        drop   = FALSE
+      ) +
+      labs(
+        title = question_title,  # pergunta como título
+        x     = NULL,
+        y     = NULL,
+        fill  = NULL
+      ) +
+      theme_minimal(base_size = 16) +
+      theme(
+        text               = element_text(size = 16),
+        axis.text.x        = element_text(size = 14),
+        axis.text.y        = element_text(size = 14),
+        legend.text        = element_text(size = 14),
+        legend.title       = element_text(size = 14),
+        legend.position    = "bottom",
+        plot.title         = element_text(size = 18, face = "bold", hjust = 0.5),
+        panel.grid.major.y = element_blank()
+      )
+    
+    # -------------------------- emojis --------------------------
+    df_emojis <- df %>%
+      dplyr::distinct(label, img) %>%
+      dplyr::filter(!is.na(img), nzchar(img))
+    
+    if (nrow(df_emojis) > 0) {
+      # caminho de arquivo (www/emojis/...)
+      df_emojis <- df_emojis %>%
+        dplyr::mutate(img_fs = file.path("www", img))
+      
+      p <- p +
+        ggimage::geom_image(
+          data        = df_emojis,
+          aes(x = label, y = 0, image = img_fs),
+          inherit.aes = FALSE,
+          size        = 0.06,
+          asp         = 1.3
+        )
+    }
+    
+    p
+  })
+  
   # ===================== observers =====================
   
   # ---- general -----
@@ -3248,6 +4012,24 @@ server <- function(input, output, session) {
       selected = character(0) # nenhum selecionado = "todos"
     )
   }, ignoreInit = TRUE)
+  
+  # ---- cache ----
+  
+  observeEvent(list(authed(), session_role(), selected_institution_id()), {
+    cache_clear(EVAL_CACHE_PREFIX)
+  }, ignoreInit = TRUE)
+  
+  observeEvent(authed(), {
+    if (isTRUE(authed())) memo_clear_all()
+  }, ignoreInit = TRUE)
+  
+  observeEvent(list(api_token(), selected_institution_id()), {
+    if (!is.null(api_token())) memo_clear_all()
+  }, ignoreInit = TRUE)
+  
+  session$onSessionEnded(function(...) {
+    memo_clear_all()
+  })
   
   # ---- evals -----
   
@@ -3447,6 +4229,10 @@ server <- function(input, output, session) {
     if (!is.null(sid))  mm_selected_score_id(as.character(sid))
     if (!is.null(dstr)) mm_selected_date(as.Date(dstr))
   }, ignoreInit = TRUE)
+  
+  # ---- answers ----
+  
+  
   
   # ---- end -----
 }
