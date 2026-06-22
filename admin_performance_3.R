@@ -23,7 +23,7 @@ suppressPackageStartupMessages({
   library(plotly)
 })
 
-is_local <- 1
+is_local <- 0
 is_debug <- 0
 
 # --------------------- settings ---------------------------------
@@ -74,6 +74,8 @@ users                 <- tbl(pool, "users")
 user_groups           <- tbl(pool, "user_groups")
 legal_entity_users    <- tbl(pool, "legal_entity_users")
 user_question_answers <- tbl(pool, "user_question_answers") # Q37 para nome
+
+
 
 # --------------------- helpers ---------------------------------
 
@@ -3955,6 +3957,8 @@ server <- function(input, output, session) {
     if(is_local){
       email <- "contato@sensorialsports.com"
       pass  <- "senso"
+      email <- "bruno.bember@sesisp.org.br"
+      pass  <- "sesivolei1"
     }else{
       email <- tolower(trimws(input$login_email %||% ""))
       pass  <- input$login_pass %||% ""
@@ -4229,10 +4233,6 @@ server <- function(input, output, session) {
     if (!is.null(sid))  mm_selected_score_id(as.character(sid))
     if (!is.null(dstr)) mm_selected_date(as.Date(dstr))
   }, ignoreInit = TRUE)
-  
-  # ---- answers ----
-  
-  
   
   # ---- end -----
 }
