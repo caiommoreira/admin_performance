@@ -1,6 +1,6 @@
 # admin_performance.R
 
-rm(list = ls())
+rm(list = ls()) #
 
 suppressPackageStartupMessages({
   library(shiny)
@@ -16,6 +16,7 @@ suppressPackageStartupMessages({
   library(highcharter)
   library(jsonlite)
   library(mongolite)
+  library(googlesheets4)
   library(ggplot2)
   library(forcats)
   library(scales)
@@ -23,8 +24,9 @@ suppressPackageStartupMessages({
   library(plotly)
 })
 
-is_local <- 0
+is_local <- 1
 is_debug <- 0
+is_manager <- 0
 
 # --------------------- settings ---------------------------------
 
@@ -34,6 +36,18 @@ source(paste0(directory, "Env.Data.R"))
 
 config <- if (is_debug) getHomEnvConfig() else getProdEnvConfig()
 
+gs4_auth_path <- paste0(directory, "sensorialsports-fa9fdc558dd6.json")
+gs4_auth_ok <- FALSE
+if (!is.na(gs4_auth_path) && nzchar(gs4_auth_path)) {
+  gs4_auth_ok <- tryCatch({
+    googlesheets4::gs4_auth(path = gs4_auth_path)
+    TRUE
+  }, error = function(e) FALSE)
+}
+
+TRIAGE_SHEET_ID <- "10knuvOilqvyuW948M5xm8sDnkB2BHxk2fM7R7mOqk5o"
+SCREENING_THRESHOLDS_SHEET <- "screening_thresholds"
+MINIGAMES_RANKING_SHEET <- "minigames_ranking"
 app_title <- "Sensorial – Admin Performance (alpha)"
 
 api_address <- "https://admin.sensorial.life/"
@@ -74,9 +88,7 @@ users                 <- tbl(pool, "users")
 user_groups           <- tbl(pool, "user_groups")
 legal_entity_users    <- tbl(pool, "legal_entity_users")
 user_question_answers <- tbl(pool, "user_question_answers") # Q37 para nome
-
-
-
+user_rankings         <- tbl(pool, "user_rankings")
 # --------------------- helpers ---------------------------------
 
 # ---- login -----
@@ -146,6 +158,14 @@ get_names_for_users <- function(uids) {
     slice_max(order_by = coalesce(.data$updated_at, .data$created_at), n = 1, with_ties = FALSE) %>%
     ungroup() %>%
     transmute(user_id = as.integer(.data$user_id), name = as.character(.data$value)) %>%
+    collect()
+}
+
+get_nickname_for_users <- function(uids) {
+  if (length(uids) == 0) return(tibble(user_id = integer(), nickname = character()))
+  users %>%
+    filter(.data$id %in% !!as.integer(uids)) %>%
+    transmute(user_id = as.integer(.data$id), nickname = as.character(.data$user)) %>%
     collect()
 }
 
@@ -431,6 +451,38 @@ monthly_with_totals <- function(out, month_label = "Mês") {
   out2
 }
 
+triage_tab_label <- function() {
+  paste0("Triagem e Ativa", intToUtf8(231), intToUtf8(227), "o")
+}
+
+triage_tab_panel <- function() {
+  tabPanel(
+    triage_tab_label(),
+    br(),
+    fluidRow(
+      column(9),
+      column(
+        3,
+        div(
+          style = "display:flex; justify-content:flex-end;",
+          textInput("triage_manager_code", label = NULL, value = "", width = "120px")
+        )
+      )
+    ),
+    tags$h4("Triagens", style = "text-align:center; font-weight:700;"),
+    fluidRow(align = "center", DTOutput("tbl_triage_monthly", width = "33%")),
+    br(),
+    fluidRow(align = "right", uiOutput("ui_triage_back")),
+    highchartOutput("hc_triage_groups", height = "650px"),
+    div(
+      style = "display:flex; justify-content:center; align-items:center; gap:12px; margin: 10px 0 4px 0;",
+      uiOutput("ui_triage_pager")
+    ),
+    br(),
+    uiOutput("ui_triage_detail")
+  )
+}
+
 emoji_img <- function(filename, size = 18) {
   # filename ex.: "feliz.png" ou "feliz.svg"
   sprintf(
@@ -512,6 +564,25 @@ get_moove_scores_data_cached <- function(sel_users, inst_id, group_choice) {
   if (length(sel_users) == 0) return(tibble::tibble())
   key <- paste0("minigames:moove_scores:", minigames_cache_key(inst_id, group_choice))
   memo_get_minigames(key, function() get_moove_scores_data(sel_users))
+}
+
+get_moove_scores_raw_data_cached <- function(sel_users, inst_id, group_choice) {
+  if (length(sel_users) == 0) return(tibble::tibble())
+  key <- paste0("minigames:moove_scores_raw:", minigames_cache_key(inst_id, group_choice))
+  memo_get_minigames(key, function() get_moove_scores_raw_data(sel_users))
+}
+
+get_moove_scores_game_parameter_data_cached <- function(sel_users, inst_id, group_choice, game_id, game_parameter, parameter_logic = "desc", limit_n = 100L) {
+  if (length(sel_users) == 0) return(tibble::tibble())
+  key <- paste0(
+    "minigames:game_parameter:",
+    minigames_cache_key(inst_id, group_choice),
+    "|game=", as.character(game_id),
+    "|param=", as.character(game_parameter),
+    "|logic=", as.character(parameter_logic),
+    "|limit=", as.character(limit_n)
+  )
+  memo_get_minigames(key, function() get_moove_scores_game_parameter_data(sel_users, game_id, game_parameter, parameter_logic = parameter_logic, limit_n = limit_n))
 }
 
 get_user_settings_avg_percentiles_cached <- function(sel_users, inst_id, group_choice) {
@@ -679,6 +750,87 @@ get_moove_scores_data <- function(sel_users) {
   df
 }
 
+get_moove_scores_raw_data <- function(sel_users) {
+  if (length(sel_users) == 0) return(tibble::tibble())
+  url.mongodb <- config[6]
+  ids <- as.integer(sel_users)
+  
+  m <- mongolite::mongo(collection = "moove_scores", url = url.mongodb)
+  on.exit(m$disconnect(), add = TRUE)
+  
+  # Inclui o campo parameters.score_percentiles no projection
+  q <- jsonlite::toJSON(list(user_id = list("$in" = as.list(ids)),game_id = 138), auto_unbox = TRUE)
+  df <- m$find(
+    query  = q,
+    fields = '{"_id":0,"user_id":1,"game_id":1,"date_time":1,"parameters.correct_responses_per_minute":1,"parameters.incorrect_responses_per_minute":1,"parameters.average_response_time":1}'
+  )
+
+  if (is.null(df) || !nrow(df)) return(tibble::tibble())
+
+  df <- tibble::as_tibble(df)
+
+  if ("parameters" %in% names(df)) {
+    df$correct_responses_per_minute <- suppressWarnings(as.numeric(df$parameters$correct_responses_per_minute))
+    df$incorrect_responses_per_minute <- suppressWarnings(as.numeric(df$parameters$incorrect_responses_per_minute))
+    df$average_response_time <- suppressWarnings(as.numeric(df$parameters$average_response_time))
+    df$parameters <- NULL
+  } else {
+    if (!"correct_responses_per_minute" %in% names(df) && "parameters.correct_responses_per_minute" %in% names(df)) {
+      df$correct_responses_per_minute <- suppressWarnings(as.numeric(df[["parameters.correct_responses_per_minute"]]))
+    }
+    if (!"incorrect_responses_per_minute" %in% names(df) && "parameters.incorrect_responses_per_minute" %in% names(df)) {
+      df$incorrect_responses_per_minute <- suppressWarnings(as.numeric(df[["parameters.incorrect_responses_per_minute"]]))
+    }
+    if (!"average_response_time" %in% names(df) && "parameters.average_response_time" %in% names(df)) {
+      df$average_response_time <- suppressWarnings(as.numeric(df[["parameters.average_response_time"]]))
+    }
+  }
+
+  if (!"correct_responses_per_minute" %in% names(df)) df$correct_responses_per_minute <- NA_real_
+  if (!"incorrect_responses_per_minute" %in% names(df)) df$incorrect_responses_per_minute <- NA_real_
+  if (!"average_response_time" %in% names(df)) df$average_response_time <- NA_real_
+
+  df %>%
+    dplyr::mutate(
+      correct_responses_per_minute   = round(.data$correct_responses_per_minute),
+      incorrect_responses_per_minute = round(.data$incorrect_responses_per_minute),
+      average_response_time          = round(1000 * .data$average_response_time)
+    )
+}
+
+get_moove_scores_game_parameter_data <- function(sel_users, game_id, game_parameter, parameter_logic = "desc", limit_n = 100L) {
+  if (length(sel_users) == 0) return(tibble::tibble())
+  url.mongodb <- config[6]
+  ids <- as.integer(sel_users)
+  game_id <- as.integer(game_id)
+  game_parameter <- as.character(game_parameter)
+  field_name <- paste0("parameters.", game_parameter)
+
+  m <- mongolite::mongo(collection = "moove_scores", url = url.mongodb)
+  on.exit(m$disconnect(), add = TRUE)
+
+  q <- jsonlite::toJSON(list(user_id = list("$in" = as.list(ids)), game_id = game_id), auto_unbox = TRUE)
+  fields_json <- sprintf('{"_id":0,"user_id":1,"game_id":1,"date_time":1,"%s":1}', field_name)
+  df <- m$find(query = q, fields = fields_json)
+
+  if (is.null(df) || !nrow(df)) return(tibble::tibble())
+
+  df <- tibble::as_tibble(df)
+
+  if ("parameters" %in% names(df) && game_parameter %in% names(df$parameters)) {
+    df$metric_value <- suppressWarnings(as.numeric(df$parameters[[game_parameter]]))
+    df$parameters <- NULL
+  } else if (field_name %in% names(df)) {
+    df$metric_value <- suppressWarnings(as.numeric(df[[field_name]]))
+  } else {
+    df$metric_value <- NA_real_
+  }
+
+  df %>%
+    dplyr::mutate(metric_value = suppressWarnings(as.numeric(.data$metric_value))) %>%
+    dplyr::filter(!is.na(.data$metric_value))
+}
+
 get_user_settings_avg_percentiles <- function(sel_users) {
   if (length(sel_users) == 0) return(tibble::tibble())
   url.mongodb <- config[6]
@@ -719,6 +871,305 @@ to_long_percentiles <- function(df) {
       values_to = "value"
     ) %>%
     dplyr::mutate(capacity_label = capacity_labels[capacity] %||% capacity)
+}
+
+triage_threshold_defaults <- function() {
+  c(
+    triage_correct_yellow   = 72,
+    triage_correct_red      = 63,
+    triage_incorrect_yellow = 3,
+    triage_incorrect_red    = 5,
+    triage_rt_yellow        = 690,
+    triage_rt_red           = 750
+  )
+}
+
+find_triage_threshold_sheet_name <- function(sheet_id) {
+  if (!isTRUE(gs4_auth_ok)) return(NA_character_)
+
+  sheet_names <- tryCatch(
+    googlesheets4::sheet_names(sheet_id),
+    error = function(e) character()
+  )
+
+  if (!length(sheet_names)) return(NA_character_)
+
+  required_measures <- names(triage_threshold_defaults())
+
+  for (sheet_nm in sheet_names) {
+    probe <- tryCatch(
+      googlesheets4::read_sheet(sheet_id, sheet = sheet_nm, n_max = 50),
+      error = function(e) tibble::tibble()
+    )
+
+    if (is.null(probe) || !nrow(probe)) next
+
+    nm_low <- tolower(names(probe))
+    if (!all(c("measure", "value", "group", "group_id") %in% nm_low)) next
+
+    probe_tbl <- tibble::as_tibble(probe)
+    names(probe_tbl) <- nm_low
+    measures_found <- unique(as.character(probe_tbl$measure))
+
+    if (any(required_measures %in% measures_found)) {
+      return(sheet_nm)
+    }
+  }
+
+  sheet_names[[1]]
+}
+
+read_triage_threshold_sheet <- function(sheet_id) {
+  if (!isTRUE(gs4_auth_ok)) return(tibble::tibble())
+
+  target_sheet <- SCREENING_THRESHOLDS_SHEET
+
+  if (is.na(target_sheet) || !nzchar(target_sheet)) return(tibble::tibble())
+
+  out <- tryCatch(
+    googlesheets4::read_sheet(sheet_id, sheet = target_sheet),
+    error = function(e) tibble::tibble()
+  )
+
+  if (is.null(out) || !nrow(out)) return(tibble::tibble())
+
+  tibble::as_tibble(out) %>%
+    dplyr::rename_with(tolower) %>%
+    dplyr::mutate(
+      measure  = as.character(.data$measure),
+      value    = suppressWarnings(as.numeric(.data$value)),
+      group    = as.character(.data$group),
+      group_id = suppressWarnings(as.integer(.data$group_id))
+    ) %>%
+    dplyr::filter(
+      .data$measure %in% names(triage_threshold_defaults()),
+      !is.na(.data$value)
+    )
+}
+
+read_minigames_ranking_sheet <- function(sheet_id) {
+  if (!isTRUE(gs4_auth_ok)) return(tibble::tibble())
+
+  out <- tryCatch(
+    googlesheets4::read_sheet(sheet_id, sheet = MINIGAMES_RANKING_SHEET),
+    error = function(e) tibble::tibble()
+  )
+
+  if (is.null(out) || !nrow(out)) return(tibble::tibble())
+
+  tibble::as_tibble(out) %>%
+    dplyr::rename_with(tolower) %>%
+    dplyr::mutate(
+      game_id = suppressWarnings(as.integer(.data$game_id)),
+      game_name = as.character(.data$game_name),
+      game_parameter = as.character(.data$game_parameter),
+      game_parameter_name = as.character(.data$game_parameter_name),
+      parameter_logic = tolower(trimws(as.character(.data$parameter_logic)))
+    ) %>%
+    dplyr::filter(
+      !is.na(.data$game_id),
+      nzchar(.data$game_name),
+      nzchar(.data$game_parameter),
+      nzchar(.data$game_parameter_name),
+      .data$parameter_logic %in% c("asc", "desc")
+    ) %>%
+    dplyr::mutate(config_id = paste(.data$game_id, .data$game_parameter, dplyr::row_number(), sep = "__"))
+}
+
+resolve_triage_thresholds_for_group <- function(sheet_df, group_id = NA_integer_, group_name = NA_character_) {
+  defaults <- triage_threshold_defaults()
+
+  if (is.null(sheet_df) || !nrow(sheet_df)) return(defaults)
+
+  hit <- sheet_df %>%
+    dplyr::filter(!is.na(.data$group_id), .data$group_id == !!as.integer(group_id))
+
+  if (!nrow(hit) && !is.na(group_name) && nzchar(group_name)) {
+    hit <- sheet_df %>%
+      dplyr::filter(tolower(.data$group) == tolower(group_name))
+  }
+
+  if (!nrow(hit)) return(defaults)
+
+  vals <- hit %>%
+    dplyr::group_by(.data$measure) %>%
+    dplyr::summarise(value = dplyr::first(.data$value), .groups = "drop")
+
+  out <- defaults
+  matched <- intersect(vals$measure, names(out))
+  out[matched] <- vals$value[match(matched, vals$measure)]
+  out
+}
+
+save_triage_thresholds_for_group <- function(sheet_id, sheet_df, group_id, group_name, values_named) {
+  if (!isTRUE(gs4_auth_ok)) return(FALSE)
+
+  target_sheet <- SCREENING_THRESHOLDS_SHEET
+
+  if (is.na(target_sheet) || !nzchar(target_sheet)) return(FALSE)
+
+  defaults <- triage_threshold_defaults()
+  required_measures <- names(defaults)
+  matched <- intersect(names(values_named), required_measures)
+  if (!length(matched)) return(FALSE)
+
+  live_df <- tryCatch(
+    googlesheets4::read_sheet(sheet_id, sheet = target_sheet),
+    error = function(e) tibble::tibble()
+  )
+
+  base_df <- tibble::as_tibble(live_df)
+  if (!nrow(base_df)) {
+    base_df <- tibble::tibble(
+      measure = character(),
+      value = numeric(),
+      group = character(),
+      group_id = integer()
+    )
+  }
+
+  if (!"measure" %in% names(base_df))  base_df$measure <- NA_character_
+  if (!"value" %in% names(base_df))    base_df$value <- NA_real_
+  if (!"group" %in% names(base_df))    base_df$group <- NA_character_
+  if (!"group_id" %in% names(base_df)) base_df$group_id <- NA_integer_
+
+  base_df <- base_df %>%
+    dplyr::mutate(
+      measure = as.character(.data$measure),
+      value = suppressWarnings(as.numeric(.data$value)),
+      group = as.character(.data$group),
+      group_id = suppressWarnings(as.integer(.data$group_id))
+    )
+
+  out <- base_df
+  gid <- as.integer(group_id)
+  gname <- as.character(group_name %||% "")
+
+  for (ms in matched) {
+    hit_idx <- which(
+      !is.na(out$group_id) &
+        out$group_id == gid &
+        !is.na(out$measure) &
+        out$measure == ms
+    )
+
+    if (!length(hit_idx) && nzchar(gname)) {
+      hit_idx <- which(
+        tolower(dplyr::coalesce(out$group, "")) == tolower(gname) &
+          !is.na(out$measure) &
+          out$measure == ms
+      )
+    }
+
+    if (length(hit_idx)) {
+      row_i <- hit_idx[[1]]
+      out$value[row_i] <- as.numeric(values_named[[ms]])
+      out$group[row_i] <- gname
+      out$group_id[row_i] <- gid
+    } else {
+      new_row <- as.list(rep(NA, ncol(out)))
+      names(new_row) <- names(out)
+      new_row$measure <- ms
+      new_row$value <- as.numeric(values_named[[ms]])
+      new_row$group <- gname
+      new_row$group_id <- gid
+      out <- dplyr::bind_rows(out, tibble::as_tibble(new_row))
+    }
+  }
+
+  ok <- tryCatch({
+    googlesheets4::sheet_write(data = out, ss = sheet_id, sheet = target_sheet)
+    TRUE
+  }, error = function(e) FALSE)
+
+  ok
+}
+
+compute_triage_default_range <- function(dates, today = Sys.Date()) {
+  dates <- as.Date(dates)
+  dates <- dates[!is.na(dates)]
+  if (!length(dates)) {
+    end_date <- as.Date(today)
+    return(list(start = end_date - 10, end = end_date))
+  }
+
+  default_start <- as.Date(today) - 10
+  default_end   <- as.Date(today)
+
+  if (any(dates >= default_start & dates <= default_end)) {
+    return(list(start = default_start, end = default_end))
+  }
+
+  max_date <- max(dates)
+  list(start = max_date - 10, end = max_date)
+}
+
+triage_stamp_rank <- function(x) {
+  dplyr::case_when(
+    x == "red"    ~ 4L,
+    x == "orange" ~ 3L,
+    x == "yellow" ~ 2L,
+    TRUE          ~ 1L
+  )
+}
+
+build_triage_distribution_plot <- function(df, value_col, title_txt, xlab_txt,
+                                           observed_specs = NULL, threshold_specs = NULL,
+                                           subtitle_txt = NULL, bins = 30L) {
+  vals <- suppressWarnings(as.numeric(df[[value_col]]))
+  vals <- vals[is.finite(vals)]
+
+  if (!length(vals)) {
+    return(
+      ggplot2::ggplot() +
+        ggplot2::theme_minimal(base_size = 15) +
+        ggplot2::labs(title = title_txt, subtitle = subtitle_txt, x = xlab_txt, y = "Número de sessões")
+    )
+  }
+
+  h <- graphics::hist(vals, breaks = bins, plot = FALSE)
+  y_max <- max(h$counts %||% 0, na.rm = TRUE)
+  y_lab_low  <- max(1, 0.06 * y_max)
+  y_lab_high <- max(1, 0.90 * y_max)
+
+  mk_specs <- function(df_specs, kind, y_val) {
+    if (is.null(df_specs) || !nrow(df_specs)) return(NULL)
+    df_specs %>%
+      dplyr::mutate(kind = kind, y = y_val)
+  }
+
+  lines_df <- dplyr::bind_rows(
+    mk_specs(observed_specs, "observed", y_lab_high),
+    mk_specs(threshold_specs, "threshold", y_lab_low)
+  )
+
+  p <- ggplot2::ggplot(df, ggplot2::aes(x = .data[[value_col]])) +
+    ggplot2::geom_histogram(bins = bins, fill = "#5B5FF5", alpha = 0.85, color = "white")
+
+  if (nrow(lines_df)) {
+    p <- p +
+      ggplot2::geom_vline(
+        data = lines_df,
+        ggplot2::aes(xintercept = value, color = color, linetype = kind),
+        linewidth = 1
+      )
+  }
+
+  p +
+    ggplot2::scale_color_identity() +
+    ggplot2::scale_linetype_manual(values = c(observed = "solid", threshold = "dashed")) +
+    ggplot2::labs(
+      title = title_txt,
+      subtitle = subtitle_txt,
+      x = xlab_txt,
+      y = "Número de sessões"
+    ) +
+    ggplot2::theme_minimal(base_size = 15) +
+    ggplot2::theme(
+      plot.title = ggplot2::element_text(face = "bold", hjust = 0.5),
+      plot.subtitle = ggplot2::element_text(hjust = 0.5),
+      panel.grid.minor = ggplot2::element_blank()
+    )
 }
 
 # ---- measurements -----
@@ -1097,6 +1548,59 @@ ui <- fluidPage(
                       uiOutput("ui_perf_paging")
                     )
                   ),
+                  tabPanel(
+                    "Rankings",
+                    br(),
+                    tabsetPanel(
+                      id = "rankings_tabs",
+                      tabPanel(
+                        "Ranking Moove",
+                        fluidRow(
+                          column(12, uiOutput("ui_rankings_scope"))
+                        ),
+                        fluidRow(
+                          column(12, uiOutput("ui_rankings_top3"))
+                        ),
+                        br(),
+                        fluidRow(
+                          column(12, DTOutput("tbl_rankings"))
+                        )
+                      ),
+                      tabPanel(
+                        "Ranking Minigames",
+                        fluidRow(
+                          column(12, uiOutput("ui_rankings_minigame_scope"))
+                        ),
+                        fluidRow(
+                          column(12, uiOutput("ui_rankings_minigame_title"))
+                        ),
+                        fluidRow(
+                          column(12, uiOutput("ui_rankings_minigame_top3"))
+                        ),
+                        br(),
+                        fluidRow(
+                          column(12, DTOutput("tbl_rankings_minigame"))
+                        )
+                      )
+                    )
+                  ),
+
+                  # ---- triage ----- 
+                  tabPanel(
+                    triage_tab_label(),
+                    br(),
+                    tags$h4("Triagens", style = "text-align:center; font-weight:700;"),
+                    fluidRow(align = "center", DTOutput("tbl_triage_monthly", width = "33%")),
+                    br(),
+                    fluidRow(align = "right", uiOutput("ui_triage_back")),
+                    highchartOutput("hc_triage_groups", height = "650px"),
+                    div(
+                      style = "display:flex; justify-content:center; align-items:center; gap:12px; margin: 10px 0 4px 0;",
+                      uiOutput("ui_triage_pager")
+                    ),
+                    br(),
+                    uiOutput("ui_triage_detail")
+                  ),
                   
                   # ---- measurements -----
                   
@@ -1162,6 +1666,8 @@ server <- function(input, output, session) {
   session_role    <- reactiveVal(NULL)        # "institution" | "trainer" (trainer ficará para próximo passo)
   api_token       <- reactiveVal(NULL)        # string
   institution_raw <- reactiveVal(NULL)        # lista completa do content (parsed)
+  authed_email    <- reactiveVal(NA_character_)
+  triage_tab_visible <- reactiveVal(TRUE)
   
   # ---- institution and groups -----
   
@@ -1215,6 +1721,163 @@ server <- function(input, output, session) {
       return(as.integer(input$sel_user))
     }
     as.integer(scope_user_ids())
+  })
+
+  institution_user_ids <- reactive({
+    req(authed(), session_role() == "institution")
+    inst_id <- req(selected_institution_id())
+    get_user_ids_for_institution_or_group(inst_id, "ALL")
+  })
+
+  ranking_base_df <- reactive({
+    req(authed(), session_role() == "institution")
+
+    df <- user_rankings %>%
+      dplyr::select(id, user_id, score, neurons, created_at, updated_at) %>%
+      dplyr::collect()
+
+    if (is.null(df) || !nrow(df)) {
+      return(tibble::tibble(
+        user_id = integer(),
+        display_name = character(),
+        score = numeric(),
+        neurons = numeric(),
+        global_rank = integer(),
+        institution_rank = integer(),
+        in_institution = logical()
+      ))
+    }
+
+    df <- tibble::as_tibble(df) %>%
+      dplyr::mutate(
+        id = suppressWarnings(as.numeric(.data$id)),
+        user_id = as.integer(.data$user_id),
+        score = as.numeric(.data$score),
+        neurons = as.numeric(.data$neurons),
+        ref_ts = dplyr::coalesce(.data$updated_at, .data$created_at)
+      ) %>%
+      dplyr::filter(!is.na(.data$user_id), !is.na(.data$score)) %>%
+      dplyr::arrange(.data$user_id, dplyr::desc(.data$ref_ts), dplyr::desc(.data$id)) %>%
+      dplyr::group_by(.data$user_id) %>%
+      dplyr::slice_head(n = 1) %>%
+      dplyr::ungroup()
+
+    nm_df <- get_names_for_users(unique(as.integer(df$user_id)))
+    nk_df <- get_nickname_for_users(unique(as.integer(df$user_id)))
+    inst_uids <- unique(as.integer(institution_user_ids()))
+
+    out <- df %>%
+      dplyr::left_join(nm_df, by = "user_id") %>%
+      dplyr::left_join(nk_df, by = "user_id") %>%
+      dplyr::mutate(
+        display_name = dplyr::coalesce(.data$name, .data$nickname, paste0("user_", .data$user_id)),
+        neurons = dplyr::coalesce(.data$neurons, 0)
+      ) %>%
+      dplyr::arrange(dplyr::desc(.data$score), dplyr::desc(.data$neurons), .data$user_id) %>%
+      dplyr::mutate(
+        global_rank = dplyr::row_number(),
+        in_institution = .data$user_id %in% inst_uids
+      )
+
+    inst_rank_df <- out %>%
+      dplyr::filter(.data$in_institution) %>%
+      dplyr::transmute(user_id = .data$user_id, institution_rank = dplyr::row_number())
+
+    out %>%
+      dplyr::left_join(inst_rank_df, by = "user_id") %>%
+      dplyr::select(user_id, display_name, score, neurons, global_rank, institution_rank, in_institution)
+  })
+
+    ranking_scope_df <- reactive({
+    req(authed(), session_role() == "institution")
+    mode <- input$ranking_scope %||% "global"
+    df <- ranking_base_df()
+
+    if (!nrow(df)) return(df)
+
+    if (identical(mode, "institution")) {
+      df %>%
+        dplyr::filter(.data$in_institution, !is.na(.data$institution_rank)) %>%
+        dplyr::mutate(rank_display = .data$institution_rank) %>%
+        dplyr::arrange(.data$rank_display) %>%
+        dplyr::slice_head(n = 20)
+    } else {
+      df %>%
+        dplyr::mutate(rank_display = .data$global_rank) %>%
+        dplyr::arrange(.data$rank_display) %>%
+        dplyr::slice_head(n = 20)
+    }
+  })
+
+  ranking_minigame_sheet_df <- reactive({
+    req(authed(), session_role() == "institution", input$tabs == "Rankings")
+    read_minigames_ranking_sheet(TRIAGE_SHEET_ID)
+  })
+
+  ranking_minigame_selected_config <- reactive({
+    df <- ranking_minigame_sheet_df()
+    req(nrow(df) > 0)
+
+    cfg_id <- input$ranking_minigame_config
+    if (is.null(cfg_id) || !nzchar(as.character(cfg_id)) || !cfg_id %in% df$config_id) {
+      return(df[0, , drop = FALSE])
+    }
+
+    df[df$config_id == cfg_id, , drop = FALSE]
+  })
+
+  ranking_minigame_df <- reactive({
+    req(authed(), session_role() == "institution", input$tabs == "Rankings")
+    cfg <- ranking_minigame_selected_config()
+    req(nrow(cfg) == 1)
+
+    df <- get_moove_scores_game_parameter_data_cached(
+      sel_users = institution_user_ids(),
+      inst_id = selected_institution_id(),
+      group_choice = "ALL",
+      game_id = cfg$game_id[[1]],
+      game_parameter = cfg$game_parameter[[1]],
+      parameter_logic = cfg$parameter_logic[[1]],
+      limit_n = 100L
+    )
+
+    if (is.null(df) || !nrow(df)) return(tibble::tibble())
+
+    logic_desc <- identical(cfg$parameter_logic[[1]], "desc")
+
+    df <- df %>%
+      dplyr::mutate(
+        played_at = suppressWarnings(lubridate::ymd_hms(.data$date_time, tz = "UTC", quiet = TRUE)),
+        played_at = dplyr::coalesce(.data$played_at, suppressWarnings(as.POSIXct(.data$date_time, tz = "UTC")))
+      )
+
+    if (isTRUE(logic_desc)) {
+      df <- df %>% dplyr::arrange(.data$user_id, dplyr::desc(.data$metric_value), dplyr::desc(.data$played_at))
+    } else {
+      df <- df %>% dplyr::arrange(.data$user_id, .data$metric_value, dplyr::desc(.data$played_at))
+    }
+
+    df <- df %>%
+      dplyr::group_by(.data$user_id) %>%
+      dplyr::slice_head(n = 1) %>%
+      dplyr::ungroup()
+
+    nm_df <- get_names_for_users(unique(as.integer(df$user_id)))
+    nk_df <- get_nickname_for_users(unique(as.integer(df$user_id)))
+
+    df <- df %>%
+      dplyr::left_join(nm_df, by = "user_id") %>%
+      dplyr::left_join(nk_df, by = "user_id") %>%
+      dplyr::mutate(display_name = dplyr::coalesce(.data$name, .data$nickname, paste0("user_", .data$user_id)))
+
+    if (isTRUE(logic_desc)) {
+      df <- df %>% dplyr::arrange(dplyr::desc(.data$metric_value), dplyr::desc(.data$played_at), .data$user_id)
+    } else {
+      df <- df %>% dplyr::arrange(.data$metric_value, dplyr::desc(.data$played_at), .data$user_id)
+    }
+
+    df %>%
+      dplyr::mutate(rank_display = dplyr::row_number())
   })
   
   # ---- cache -----
@@ -1726,6 +2389,314 @@ server <- function(input, output, session) {
   })
   
   perf_page <- reactiveVal(1)
+
+  # ---- triage and activation -----
+
+  triage_raw_df <- reactive({
+    req(authed(), session_role() == "institution", input$tabs == triage_tab_label())
+    triage_refresh_tick()
+    uids    <- scope_user_ids()
+    inst_id <- selected_institution_id()
+    choice  <- input$sel_group %||% "ALL"
+
+    get_moove_scores_raw_data_cached(uids, inst_id, choice) %>%
+      dplyr::mutate(
+        played_at = suppressWarnings(lubridate::ymd_hms(.data$date_time, tz = "UTC", quiet = TRUE)),
+        played_at = dplyr::coalesce(.data$played_at, suppressWarnings(as.POSIXct(.data$date_time, tz = "UTC"))),
+        date      = dplyr::coalesce(as.Date(.data$played_at), as.Date(substr(as.character(.data$date_time), 1, 10))),
+        hour      = substr(as.character(.data$date_time), 12, 13)
+      )
+  })
+
+  triage_view_mode <- reactiveVal("groups")
+
+  triage_selected_group <- reactiveVal(NA_integer_)
+  triage_selected_click_date <- reactiveVal(as.Date(NA))
+  triage_refresh_tick <- reactiveVal(0L)
+  triage_manager_mode <- reactive({
+    isTRUE(is_manager == 1) || identical(trimws(as.character(input$triage_manager_code %||% "")), "Senso298")
+  })
+
+  triage_page <- reactiveVal(1L)
+
+  triage_sheet_df <- reactive({
+    req(authed(), session_role() == "institution", input$tabs == triage_tab_label())
+    triage_refresh_tick()
+    read_triage_threshold_sheet(TRIAGE_SHEET_ID)
+  })
+
+  triage_sheet_group_thresholds <- reactive({
+    gid <- triage_selected_group()
+    if (is.na(gid)) return(triage_threshold_defaults())
+
+    gdf <- groups_from_api()
+    gname <- gdf$name[match(as.integer(gid), gdf$id)]
+    resolve_triage_thresholds_for_group(
+      sheet_df = triage_sheet_df(),
+      group_id = gid,
+      group_name = gname %||% NA_character_
+    )
+  })
+
+  triage_group_thresholds <- reactive({
+    sheet_vals <- triage_sheet_group_thresholds()
+
+    if (!isTRUE(triage_manager_mode())) {
+      return(sheet_vals)
+    }
+
+    c(
+      triage_correct_yellow   = as.numeric(input$triage_correct_yellow %||% sheet_vals[["triage_correct_yellow"]]),
+      triage_correct_red      = as.numeric(input$triage_correct_red %||% sheet_vals[["triage_correct_red"]]),
+      triage_incorrect_yellow = as.numeric(input$triage_incorrect_yellow %||% sheet_vals[["triage_incorrect_yellow"]]),
+      triage_incorrect_red    = as.numeric(input$triage_incorrect_red %||% sheet_vals[["triage_incorrect_red"]]),
+      triage_rt_yellow        = as.numeric(input$triage_rt_yellow %||% sheet_vals[["triage_rt_yellow"]]),
+      triage_rt_red           = as.numeric(input$triage_rt_red %||% sheet_vals[["triage_rt_red"]])
+    )
+  })
+
+  triage_correct_yellow <- reactive({
+    as.numeric(input$triage_correct_yellow %||% triage_threshold_defaults()[["triage_correct_yellow"]])
+  })
+
+  triage_correct_red <- reactive({
+    as.numeric(input$triage_correct_red %||% triage_threshold_defaults()[["triage_correct_red"]])
+  })
+
+  triage_incorrect_yellow <- reactive({
+    as.numeric(input$triage_incorrect_yellow %||% triage_threshold_defaults()[["triage_incorrect_yellow"]])
+  })
+
+  triage_incorrect_red <- reactive({
+    as.numeric(input$triage_incorrect_red %||% triage_threshold_defaults()[["triage_incorrect_red"]])
+  })
+
+  triage_rt_yellow <- reactive({
+    as.numeric(input$triage_rt_yellow %||% triage_threshold_defaults()[["triage_rt_yellow"]])
+  })
+
+  triage_rt_red <- reactive({
+    as.numeric(input$triage_rt_red %||% triage_threshold_defaults()[["triage_rt_red"]])
+  })
+
+  triage_group_stats <- reactive({
+    req(authed(), session_role() == "institution", input$tabs == triage_tab_label())
+    d <- triage_raw_df()
+    req(nrow(d) > 0)
+
+    g_api <- groups_from_api()
+    ug <- user_groups %>%
+      dplyr::filter(.data$user_id %in% !!unique(as.integer(d$user_id))) %>%
+      dplyr::transmute(user_id = as.integer(.data$user_id), group_id = as.integer(.data$group_id)) %>%
+      dplyr::distinct() %>%
+      dplyr::collect()
+
+    if (!nrow(ug) || !nrow(g_api)) {
+      return(tibble::tibble(group_id = integer(), group_name = character(), n = integer()))
+    }
+
+    ug_named <- ug %>%
+      dplyr::inner_join(g_api %>% dplyr::rename(group_id = id, group_name = name), by = "group_id")
+
+    d %>%
+      dplyr::left_join(ug_named, by = "user_id") %>%
+      dplyr::group_by(group_id, group_name) %>%
+      dplyr::summarise(n = dplyr::n(), .groups = "drop") %>%
+      dplyr::filter(!is.na(group_name) & group_name != "")
+  })
+
+  triage_selected_group_users <- reactive({
+    gid <- triage_selected_group()
+    req(!is.na(gid))
+
+    user_groups %>%
+      dplyr::filter(.data$group_id == !!as.integer(gid)) %>%
+      dplyr::transmute(user_id = as.integer(.data$user_id)) %>%
+      dplyr::distinct() %>%
+      dplyr::collect()
+  })
+
+  triage_selected_group_name <- reactive({
+    gid <- triage_selected_group()
+    req(!is.na(gid))
+
+    gdf <- groups_from_api()
+    as.character(gdf$name[match(as.integer(gid), gdf$id)] %||% "")
+  })
+
+  triage_selected_group_df <- reactive({
+    req(authed(), session_role() == "institution", input$tabs == triage_tab_label())
+    gid <- triage_selected_group()
+    req(!is.na(gid))
+
+    d <- triage_raw_df()
+    ug_users <- triage_selected_group_users()
+    req(nrow(ug_users) > 0)
+
+    nm_df <- get_nickname_for_users(ug_users$user_id)
+
+    d %>%
+      dplyr::filter(.data$user_id %in% ug_users$user_id) %>%
+      dplyr::left_join(nm_df, by = "user_id") %>%
+      dplyr::mutate(name = dplyr::coalesce(.data$nickname, paste0("user_", .data$user_id)))
+  })
+
+  triage_quantiles <- reactive({
+    req(triage_selected_group_df())
+    d <- triage_selected_group_df()
+    req(nrow(d) > 0)
+
+    q_num <- function(x, probs) {
+      stats::quantile(as.numeric(x), probs = probs, na.rm = TRUE, names = FALSE, type = 7)
+    }
+
+    list(
+      correct   = q_num(d$correct_responses_per_minute, c(0.10, 0.25)),
+      incorrect = q_num(d$incorrect_responses_per_minute, c(0.75, 0.90)),
+      rt        = q_num(d$average_response_time, c(0.75, 0.90))
+    )
+  })
+
+  triage_processed_df <- reactive({
+    req(triage_selected_group_df())
+    d <- triage_selected_group_df()
+    req(nrow(d) > 0)
+
+    thr <- triage_group_thresholds()
+    correct_yellow   <- as.numeric(thr[["triage_correct_yellow"]])
+    correct_red      <- as.numeric(thr[["triage_correct_red"]])
+    incorrect_yellow <- as.numeric(thr[["triage_incorrect_yellow"]])
+    incorrect_red    <- as.numeric(thr[["triage_incorrect_red"]])
+    rt_yellow        <- as.numeric(thr[["triage_rt_yellow"]])
+    rt_red           <- as.numeric(thr[["triage_rt_red"]])
+
+    d %>%
+      dplyr::mutate(
+        correct_stamp = dplyr::case_when(
+          .data$correct_responses_per_minute <= correct_red    ~ "red",
+          .data$correct_responses_per_minute <  correct_yellow ~ "yellow",
+          TRUE                                                 ~ "white"
+        ),
+        incorrect_stamp = dplyr::case_when(
+          .data$incorrect_responses_per_minute > incorrect_red    ~ "red",
+          .data$incorrect_responses_per_minute > incorrect_yellow ~ "yellow",
+          TRUE                                                    ~ "white"
+        ),
+        rt_stamp = dplyr::case_when(
+          .data$average_response_time > rt_red    ~ "red",
+          .data$average_response_time > rt_yellow ~ "yellow",
+          TRUE                                    ~ "white"
+        ),
+        yellow_count = (.data$correct_stamp == "yellow") +
+          (.data$incorrect_stamp == "yellow") +
+          (.data$rt_stamp == "yellow"),
+        stamp_color = dplyr::case_when(
+          .data$correct_stamp == "red" | .data$incorrect_stamp == "red" | .data$rt_stamp == "red" ~ "red",
+          .data$yellow_count >= 2 ~ "orange",
+          .data$yellow_count == 1 ~ "yellow",
+          TRUE                    ~ "white"
+        ),
+        severity_rank = triage_stamp_rank(.data$stamp_color)
+      )
+  })
+
+  triage_date_bounds <- reactive({
+    d <- triage_selected_group_df()
+    req(nrow(d) > 0)
+    compute_triage_default_range(d$date)
+  })
+
+  triage_panel_df <- reactive({
+    req(triage_processed_df())
+    d <- triage_processed_df()
+    req(nrow(d) > 0)
+    req(input$triage_date_start, input$triage_date_end)
+
+    start_date <- as.Date(input$triage_date_start)
+    end_date   <- as.Date(input$triage_date_end)
+
+    d <- d %>%
+      dplyr::filter(.data$date >= start_date, .data$date <= end_date)
+
+    if (!nrow(d)) {
+      return(tibble::tibble(
+        user_id = integer(),
+        name = character(),
+        date = as.Date(character()),
+        stamp_color = character(),
+        hour = character(),
+        severity_rank = integer(),
+        label_color = character()
+      ))
+    }
+
+    d %>%
+      dplyr::arrange(.data$user_id, .data$date, dplyr::desc(.data$severity_rank), dplyr::desc(.data$played_at)) %>%
+      dplyr::group_by(.data$user_id, .data$name, .data$date) %>%
+      dplyr::summarise(
+        stamp_color = dplyr::first(.data$stamp_color),
+        hour = dplyr::first(.data$hour),
+        severity_rank = dplyr::first(.data$severity_rank),
+        .groups = "drop"
+      ) %>%
+      dplyr::mutate(
+        label_color = dplyr::if_else(.data$stamp_color == "red", "white", "black")
+      )
+  })
+
+  triage_download_base_df <- reactive({
+    req(triage_processed_df())
+    d <- triage_processed_df()
+    req(nrow(d) > 0)
+    req(input$triage_date_start, input$triage_date_end)
+
+    start_date <- as.Date(input$triage_date_start)
+    end_date   <- as.Date(input$triage_date_end)
+
+    d %>%
+      dplyr::filter(.data$date >= start_date, .data$date <= end_date) %>%
+      dplyr::mutate(date_download = format(.data$date, "%d/%m/%Y")) %>%
+      dplyr::arrange(.data$name, .data$date, .data$played_at) %>%
+      dplyr::transmute(
+        date_raw = .data$date,
+        `Apelido` = name,
+        Data = date_download,
+        Hora = hour,
+        `Respostas Corretas` = correct_responses_per_minute,
+        `Respostas Incorretas` = incorrect_responses_per_minute,
+        `Tempo de Resposta` = average_response_time,
+        `Selo Repostas Corretas` = correct_stamp,
+        `Selo Respostas Incorretas` = incorrect_stamp,
+        `Selo Tempo de Resposta` = rt_stamp,
+        `Selo Geral` = stamp_color
+      )
+  })
+
+  triage_download_df <- reactive({
+    req(triage_download_base_df())
+
+    triage_download_base_df() %>%
+      dplyr::select(-.data$date_raw)
+  })
+
+  triage_selected_date_download_df <- reactive({
+    req(triage_download_base_df())
+    sel_date <- triage_selected_click_date()
+    req(!is.na(sel_date))
+
+    triage_download_base_df() %>%
+      dplyr::filter(.data$date_raw == sel_date) %>%
+      dplyr::select(-.data$date_raw)
+  })
+
+  triage_panel_dims <- reactive({
+    df <- triage_panel_df()
+    n_users <- dplyr::n_distinct(df$name)
+
+    list(
+      height = max(720L, 40L * n_users + 140L)
+    )
+  })
   
   # ---- measurements -----
   
@@ -3205,6 +4176,152 @@ server <- function(input, output, session) {
     )
   })
   
+
+  output$ui_rankings_scope <- renderUI({
+    req(authed(), session_role() == "institution", input$tabs == "Rankings")
+    inst_name <- tryCatch(as.character(institution_dt()$institution_name), error = function(e) "Instituicao")
+    selected <- input$ranking_scope %||% "global"
+
+    radioButtons(
+      "ranking_scope",
+      label = "Escopo do ranking:",
+      choices = stats::setNames(c("global", "institution"), c("Global", inst_name)),
+      selected = selected,
+      inline = TRUE
+    )
+  })
+
+  output$ui_rankings_top3 <- renderUI({
+    req(authed(), session_role() == "institution", input$tabs == "Rankings")
+    df <- ranking_scope_df()
+
+    if (is.null(df) || !nrow(df)) {
+      return(div(style = "padding:12px;", "Sem dados para o ranking Moove."))
+    }
+
+    top3 <- df %>% dplyr::slice_head(n = 3)
+
+    fluidRow(
+      lapply(seq_len(nrow(top3)), function(i) {
+        row <- top3[i, , drop = FALSE]
+        column(
+          width = 4,
+          wellPanel(
+            tags$div(style = "font-size:18px; font-weight:700;", paste0("#", row$rank_display[[1]], " ", row$display_name[[1]])),
+            tags$div(style = "margin-top:6px;", paste0("Neurons: ", scales::comma(row$neurons[[1]], accuracy = 1))),
+            tags$div(style = "font-size:24px; font-weight:700; margin-top:10px;", scales::comma(row$score[[1]], accuracy = 1))
+          )
+        )
+      })
+    )
+  })
+
+  output$tbl_rankings <- DT::renderDT({
+    req(authed(), session_role() == "institution", input$tabs == "Rankings")
+    df <- ranking_scope_df()
+    req(nrow(df) > 0)
+
+    out <- df %>%
+      dplyr::transmute(
+        Rank = .data$rank_display,
+        Usuario = .data$display_name,
+        Neurons = round(.data$neurons),
+        Score = round(.data$score)
+      )
+
+    DT::datatable(
+      out,
+      rownames = FALSE,
+      options = list(pageLength = 50, dom = "tip", ordering = FALSE)
+    )
+  })
+
+  output$ui_rankings_minigame_scope <- renderUI({
+    req(authed(), session_role() == "institution", input$tabs == "Rankings")
+    df <- ranking_minigame_sheet_df()
+
+    if (is.null(df) || !nrow(df)) {
+      return(div(style = "padding:12px;", "Sem configuracao na aba minigames_ranking."))
+    }
+
+    selected <- input$ranking_minigame_config
+    if (is.null(selected) || !nzchar(as.character(selected)) || !selected %in% df$config_id) {
+      selected <- ""
+    }
+
+    selectInput(
+      "ranking_minigame_config",
+      label = "Ranking de minigame:",
+      choices = c("Selecione" = "", stats::setNames(df$config_id, paste0(df$game_name, " - ", df$game_parameter_name))),
+      selected = selected
+    )
+  })
+
+  output$ui_rankings_minigame_title <- renderUI({
+    req(authed(), session_role() == "institution", input$tabs == "Rankings")
+    cfg <- ranking_minigame_selected_config()
+    if (!nrow(cfg)) return(NULL)
+
+    tagList(
+      tags$h4(paste0("Ranking do ", cfg$game_name[[1]]), style = "text-align:center; font-weight:700;"),
+      tags$p(paste0("(", cfg$game_parameter_name[[1]], ")"), style = "text-align:center; margin-top:-6px;")
+    )
+  })
+
+  output$ui_rankings_minigame_top3 <- renderUI({
+    req(authed(), session_role() == "institution", input$tabs == "Rankings")
+    cfg <- ranking_minigame_selected_config()
+    if (!nrow(cfg)) {
+      return(div(style = "padding:12px;", "Selecione um minigame para carregar o ranking."))
+    }
+
+    df <- ranking_minigame_df()
+    req(nrow(cfg) == 1)
+
+    if (is.null(df) || !nrow(df)) {
+      return(div(style = "padding:12px;", "Sem dados para este minigame."))
+    }
+
+    top3 <- df %>% dplyr::slice_head(n = 3)
+
+    fluidRow(
+      lapply(seq_len(nrow(top3)), function(i) {
+        row <- top3[i, , drop = FALSE]
+        column(
+          width = 4,
+          wellPanel(
+            tags$div(style = "font-size:18px; font-weight:700;", paste0("#", row$rank_display[[1]], " ", row$display_name[[1]])),
+            tags$div(style = "margin-top:6px;", paste0(cfg$game_parameter_name[[1]], ": ", scales::comma(row$metric_value[[1]], accuracy = 0.01)))
+          )
+        )
+      })
+    )
+  })
+
+  output$tbl_rankings_minigame <- DT::renderDT({
+    req(authed(), session_role() == "institution", input$tabs == "Rankings")
+    cfg <- ranking_minigame_selected_config()
+    req(nrow(cfg) == 1)
+
+    df <- ranking_minigame_df()
+    req(nrow(df) > 0)
+
+    out <- df %>%
+      dplyr::transmute(
+        Rank = .data$rank_display,
+        Usuario = .data$display_name,
+        Valor = .data$metric_value
+      )
+
+    colnames(out)[3] <- cfg$game_parameter_name[[1]]
+
+    DT::datatable(
+      out,
+      rownames = FALSE,
+      options = list(pageLength = 50, dom = "tip", ordering = FALSE)
+    )
+  })
+
   output$download_mg_xlsx <- downloadHandler(filename = function() {
       d <- institution_dt()
       inst <- tryCatch(as.character(d$institution_name), error = function(e) "instituicao")
@@ -3219,6 +4336,395 @@ server <- function(input, output, session) {
         openxlsx::write.xlsx(df, file, na = "")
       }
     })
+
+  # ---- triage and activation ----
+  output$tbl_triage_monthly <- DT::renderDT({
+    req(authed(), session_role() == "institution", input$tabs == triage_tab_label())
+    df <- triage_raw_df()
+    req(nrow(df) > 0)
+
+    out <- df %>%
+      dplyr::mutate(
+        year      = lubridate::year(.data$date),
+        month_num = lubridate::month(.data$date),
+        month_lab = lubridate::month(.data$date, label = TRUE, abbr = TRUE)
+      ) %>%
+      dplyr::count(year, month_num, month_lab, name = "triagens") %>%
+      tidyr::pivot_wider(
+        names_from  = year,
+        values_from = triagens,
+        values_fill = 0
+      ) %>%
+      dplyr::arrange(month_num) %>%
+      dplyr::select(`Mês` = month_lab, dplyr::everything(), -month_num)
+
+    out <- monthly_with_totals(out, month_label = "Mês")
+
+    DT::datatable(
+      out,
+      rownames = FALSE,
+      options = list(
+        paging = FALSE,
+        searching = FALSE,
+        ordering = FALSE,
+        dom = "t"
+      )
+    )
+  })
+
+  output$hc_triage_groups <- renderHighchart({
+    req(authed(), session_role() == "institution", input$tabs == triage_tab_label())
+    df <- triage_group_stats()
+    req(nrow(df) > 0)
+
+    df <- df %>% dplyr::arrange(dplyr::desc(.data$n), .data$group_name)
+
+    n  <- nrow(df)
+    pb <- page_bounds(n, triage_page(), PER_PAGE)
+    idx <- if (pb[1] <= pb[2]) seq.int(pb[1], pb[2]) else integer(0)
+    df <- df[idx, , drop = FALSE]
+
+    avg  <- mean(df$n, na.rm = TRUE)
+    cols <- color_by_mean(df$n, avg, high_is_good = TRUE)
+
+    highchart() %>%
+      hc_chart(type = "column", inverted = TRUE) %>%
+      hc_title(text = "Triagens por grupo") %>%
+      hc_xAxis(categories = df$group_name) %>%
+      hc_yAxis(
+        title = list(text = "Quantidade de triagens"),
+        plotLines = list(list(color = "#f39c12", width = 2, value = avg, zIndex = 5))
+      ) %>%
+      hc_add_series(
+        name = "Triagens",
+        data = purrr::pmap(
+          list(df$group_name, df$n, cols),
+          function(name, y, color) list(name = name, y = y, color = color)
+        ),
+        showInLegend = FALSE
+      ) %>%
+      hc_plotOptions(column = list(
+        cursor = "pointer",
+        dataLabels = list(enabled = TRUE),
+        point = list(events = list(
+          click = JS("
+            function() {
+              Shiny.setInputValue('hc_triage_group_click', { name: this.name }, { priority: 'event' });
+            }
+          ")
+        ))
+      ))
+  })
+
+  output$ui_triage_pager <- renderUI({
+    total_items <- nrow(triage_group_stats())
+    total_pages <- max(1L, ceiling(total_items / PER_PAGE))
+    curr <- clamp(triage_page(), 1L, total_pages)
+    if (curr != triage_page()) triage_page(curr)
+
+    tagList(
+      actionButton("triage_prev", label = NULL, icon = icon("chevron-left"),
+                   class = "btn btn-light", disabled = if (curr <= 1) "disabled"),
+      span(sprintf("Página %d de %d", curr, total_pages),
+           style = "min-width:140px; text-align:center; font-weight:600;"),
+      actionButton("triage_next", label = NULL, icon = icon("chevron-right"),
+                   class = "btn btn-light", disabled = if (curr >= total_pages) "disabled")
+    )
+  })
+
+  output$ui_triage_back <- renderUI({
+    if (identical(triage_view_mode(), "group")) {
+      actionButton("btn_triage_back", "Voltar aos grupos", icon = icon("arrow-left"), class = "btn btn-light")
+    } else {
+      NULL
+    }
+  })
+
+  output$ui_triage_detail <- renderUI({
+    req(authed(), session_role() == "institution", input$tabs == triage_tab_label())
+
+    if (!identical(triage_view_mode(), "group")) {
+      return(
+        div(
+          style = "padding:12px; border:1px solid #eee; border-radius:8px; background:#fafafa;",
+          "Selecione um grupo no gráfico para ver as distribuições e o painel de triagens."
+        )
+      )
+    }
+
+    sheet_vals <- triage_sheet_group_thresholds()
+
+    tagList(
+      hr(),
+      if (isTRUE(triage_manager_mode())) {
+        tagList(
+          fluidRow(align = "center",
+            column(
+              4,
+              plotOutput("plt_triage_correct_dist", height = "420px"),
+              numericInput("triage_correct_yellow", "Respostas Corretas (Amarelo)", value = as.numeric(sheet_vals[["triage_correct_yellow"]]), min = 0),
+              numericInput("triage_correct_red", "Respostas Corretas (Vermelho)", value = as.numeric(sheet_vals[["triage_correct_red"]]), min = 0)
+            ),
+            column(
+              4,
+              plotOutput("plt_triage_incorrect_dist", height = "420px"),
+              numericInput("triage_incorrect_yellow", "Respostas Incorretas (Amarelo)", value = as.numeric(sheet_vals[["triage_incorrect_yellow"]]), min = 0),
+              numericInput("triage_incorrect_red", "Respostas Incorretas (Vermelho)", value = as.numeric(sheet_vals[["triage_incorrect_red"]]), min = 0)
+            ),
+            column(
+              4,
+              plotOutput("plt_triage_rt_dist", height = "420px"),
+              numericInput("triage_rt_yellow", "Tempo de Resposta (Amarelo)", value = as.numeric(sheet_vals[["triage_rt_yellow"]]), min = 0),
+              numericInput("triage_rt_red", "Tempo de Resposta (Vermelho)", value = as.numeric(sheet_vals[["triage_rt_red"]]), min = 0)
+            )
+          ),
+          fluidRow(
+            column(
+              12,
+              div(
+                style = "display:flex; justify-content:center; margin: 12px 0 0 0;",
+                actionButton("triage_save_thresholds", "Salvar limites na Google Sheet", icon = icon("floppy-disk"), class = "btn btn-primary")
+              )
+            )
+          )
+        )
+      },
+      br(),
+      fluidRow( align = "center",
+                column(3),
+                column(3, dateInput("triage_date_start", "Data inicial:", value = Sys.Date() - 10)),
+                column(3, dateInput("triage_date_end", "Data final:", value = Sys.Date())),
+                column(
+                  3,
+                  div(
+                    style = "padding-top: 25px; text-align:center;",
+                    actionButton("triage_refresh", "Atualizar dados", icon = icon("rotate-right"), class = "btn btn-default")
+                  )
+                )
+      ),
+      fluidRow(
+        column(12, uiOutput("ui_triage_panel_plot"))
+      ),
+      br(),
+      div(
+        style = "display:flex; justify-content:center; margin: 8px 0 16px 0;",
+        downloadButton("download_triage_xlsx", "Baixar triagens derivadas (XLSX)", class = "btn btn-primary")
+      )
+    )
+  })
+
+  output$ui_triage_panel_plot <- renderUI({
+    req(authed(), session_role() == "institution", input$tabs == triage_tab_label())
+    dims <- triage_panel_dims()
+
+    div(
+      style = "max-height:900px; overflow-y:auto; overflow-x:hidden; border:1px solid #e5e5e5; border-radius:8px; padding:8px; background:#fff;",
+      plotlyOutput("plt_triage_panel", height = paste0(dims$height, "px"), width = "100%")
+    )
+  })
+
+  output$plt_triage_correct_dist <- renderPlot({
+    req(authed(), session_role() == "institution", input$tabs == triage_tab_label())
+    d <- triage_selected_group_df()
+    qs <- triage_quantiles()
+    req(nrow(d) > 0)
+
+    threshold_specs <- tibble::tibble(
+      value = c(triage_correct_red(), triage_correct_yellow()),
+      label = c(as.character(triage_correct_red()), as.character(triage_correct_yellow())),
+      color = c("red", "#F1C40F")
+    )
+
+    observed_specs <- tibble::tibble(
+      value = c(qs$correct[1], qs$correct[2]),
+      label = c(sprintf("P10 %.1f", qs$correct[1]), sprintf("P25 %.1f", qs$correct[2])),
+      color = c("red", "#F1C40F")
+    )
+
+    subtitle_txt <- sprintf(
+      "P10 observado: %.1f | P25 observado: %.1f",
+      qs$correct[1], qs$correct[2]
+    )
+
+    print(build_triage_distribution_plot(
+      d,
+      value_col = "correct_responses_per_minute",
+      title_txt = "Distribuição das respostas corretas por minuto",
+      xlab_txt = "Número de respostas corretas por minuto",
+      observed_specs = observed_specs,
+      threshold_specs = threshold_specs,
+      subtitle_txt = subtitle_txt
+    ))
+  })
+
+  output$plt_triage_incorrect_dist <- renderPlot({
+    req(authed(), session_role() == "institution", input$tabs == triage_tab_label())
+    d <- triage_selected_group_df()
+    qs <- triage_quantiles()
+    req(nrow(d) > 0)
+
+    threshold_specs <- tibble::tibble(
+      value = c(triage_incorrect_red(), triage_incorrect_yellow()),
+      label = c(as.character(triage_incorrect_red()), as.character(triage_incorrect_yellow())),
+      color = c("red", "#F1C40F")
+    )
+
+    observed_specs <- tibble::tibble(
+      value = c(qs$incorrect[2], qs$incorrect[1]),
+      label = c(sprintf("P90 %.1f", qs$incorrect[2]), sprintf("P75 %.1f", qs$incorrect[1])),
+      color = c("red", "#F1C40F")
+    )
+
+    subtitle_txt <- sprintf(
+      "P75 observado: %.1f | P90 observado: %.1f",
+      qs$incorrect[1], qs$incorrect[2]
+    )
+
+    print(build_triage_distribution_plot(
+      d,
+      value_col = "incorrect_responses_per_minute",
+      title_txt = "Distribuição das respostas incorretas por minuto",
+      xlab_txt = "Número de respostas incorretas por minuto",
+      observed_specs = observed_specs,
+      threshold_specs = threshold_specs,
+      subtitle_txt = subtitle_txt
+    ))
+  })
+
+  output$plt_triage_rt_dist <- renderPlot({
+    req(authed(), session_role() == "institution", input$tabs == triage_tab_label())
+    d <- triage_selected_group_df()
+    qs <- triage_quantiles()
+    req(nrow(d) > 0)
+
+    threshold_specs <- tibble::tibble(
+      value = c(triage_rt_red(), triage_rt_yellow()),
+      label = c(as.character(triage_rt_red()), as.character(triage_rt_yellow())),
+      color = c("red", "#F1C40F")
+    )
+
+    observed_specs <- tibble::tibble(
+      value = c(qs$rt[2], qs$rt[1]),
+      label = c(sprintf("P90 %.1f", qs$rt[2]), sprintf("P75 %.1f", qs$rt[1])),
+      color = c("red", "#F1C40F")
+    )
+
+    subtitle_txt <- sprintf(
+      "P75 observado: %.1f | P90 observado: %.1f",
+      qs$rt[1], qs$rt[2]
+    )
+
+    print(build_triage_distribution_plot(
+      d,
+      value_col = "average_response_time",
+      title_txt = "Distribuição dos Tempos de Resposta (ms)",
+      xlab_txt = "Tempo de resposta (ms)",
+      observed_specs = observed_specs,
+      threshold_specs = threshold_specs,
+      subtitle_txt = subtitle_txt
+    ))
+  })
+
+  output$plt_triage_panel <- renderPlotly({
+    req(authed(), session_role() == "institution", input$tabs == "Triagem e Ativação")
+    df <- triage_panel_df()
+    req(nrow(df) > 0)
+    group_name <- triage_selected_group_name()
+    req(nzchar(group_name))
+
+    date_breaks <- sort(unique(df$date))
+    name_levels <- sort(unique(as.character(df$name)), na.last = TRUE)
+
+    df <- df %>%
+      dplyr::mutate(
+        name = factor(.data$name, levels = rev(name_levels)),
+        date_label = format(.data$date, "%d/%m/%Y"),
+        hover_txt = paste0(
+          "Apelido: ", .data$name,
+          "<br>Data: ", .data$date_label,
+          "<br>Hora: ", .data$hour,
+          "<br>Cor: ", .data$stamp_color
+        )
+      )
+
+    p <- ggplot2::ggplot(df, ggplot2::aes(x = .data$date, y = .data$name, text = .data$hover_txt)) +
+      ggplot2::geom_point(
+        ggplot2::aes(fill = .data$stamp_color),
+        shape = 21,
+        size = 11,
+        color = "#d9d9d9",
+        stroke = 0.9
+      ) +
+      ggplot2::geom_text(
+        ggplot2::aes(label = .data$hour, color = .data$label_color),
+        fontface = "bold",
+        size = 3.2
+      ) +
+      ggplot2::scale_fill_identity() +
+      ggplot2::scale_color_identity() +
+      ggplot2::scale_x_date(
+        breaks = date_breaks,
+        labels = function(x) format(x, "%d/%m/%Y")
+      ) +
+      ggplot2::labs(
+        title = paste0("Painel de triagens do grupo ", group_name),
+        x = NULL,
+        y = NULL
+      ) +
+      ggplot2::theme_minimal(base_size = 14) +
+      ggplot2::theme(
+        plot.title = ggplot2::element_text(face = "bold", hjust = 0.5),
+        axis.text.x = ggplot2::element_text(angle = 45, hjust = 1),
+        panel.grid.minor = ggplot2::element_blank()
+      )
+
+    plotly::ggplotly(p, tooltip = "text", source = "triage_panel") %>%
+      plotly::layout(
+        dragmode = "pan",
+        showlegend = FALSE
+      )
+  })
+
+  output$download_triage_xlsx <- downloadHandler(
+    filename = function() {
+      d <- institution_dt()
+      inst <- tryCatch(as.character(d$institution_name), error = function(e) "instituicao")
+      sprintf(
+        "triagens_derivadas_%s_%s.xlsx",
+        gsub("[^A-Za-z0-9_-]", "_", inst),
+        format(Sys.time(), "%Y%m%d-%H%M")
+      )
+    },
+    content = function(file) {
+      df <- triage_download_df()
+      if (!requireNamespace("openxlsx", quietly = TRUE)) {
+        write.csv(df, file, row.names = FALSE, fileEncoding = "UTF-8")
+      } else {
+        openxlsx::write.xlsx(df, file, na = "")
+      }
+    }
+  )
+
+  output$download_triage_selected_date_xlsx <- downloadHandler(
+    filename = function() {
+      d <- institution_dt()
+      inst <- tryCatch(as.character(d$institution_name), error = function(e) "instituicao")
+      sel_date <- triage_selected_click_date()
+      sprintf(
+        "triagens_derivadas_%s_%s.xlsx",
+        gsub("[^A-Za-z0-9_-]", "_", inst),
+        format(as.Date(sel_date), "%Y%m%d")
+      )
+    },
+    content = function(file) {
+      df <- triage_selected_date_download_df()
+      if (!requireNamespace("openxlsx", quietly = TRUE)) {
+        write.csv(df, file, row.names = FALSE, fileEncoding = "UTF-8")
+      } else {
+        openxlsx::write.xlsx(df, file, na = "")
+      }
+    }
+  )
   
   # ---- measurements -----
   
@@ -3950,6 +5456,11 @@ server <- function(input, output, session) {
     }
   }, once = TRUE)
   
+  observeEvent(TRUE, {
+    removeTab(inputId = "tabs", target = triage_tab_label())
+    triage_tab_visible(FALSE)
+  }, once = TRUE)
+
   observeEvent(TRUE, { showModal(login_modal()) }, once = TRUE)
   
   observeEvent(input$login_confirm, {
@@ -3959,6 +5470,10 @@ server <- function(input, output, session) {
       pass  <- "senso"
       email <- "bruno.bember@sesisp.org.br"
       pass  <- "sesivolei1"
+      email <- "luana@cityvida.com.br"
+      pass  <- "CityVida07"
+      # email <- "deise.superaonline@franquiasupera.com.br"
+      # pass  <- "Cc8888"
     }else{
       email <- tolower(trimws(input$login_email %||% ""))
       pass  <- input$login_pass %||% ""
@@ -3975,15 +5490,18 @@ server <- function(input, output, session) {
     
     if (!identical(tk$status, 200L)) {
       output$login_error <- renderText("Falha no login (token). Verifique credenciais.")
+      authed_email(NA_character_)
       authed(FALSE); return()
     }
     
     token <- tryCatch(tk$content$access_token, error = function(e) NULL)
     if (is.null(token) || !nzchar(token)) {
       output$login_error <- renderText("Token não recebido.")
+      authed_email(NA_character_)
       authed(FALSE); return()
     }
     api_token(token)
+    authed_email(email)
     
     # 2) Relatório de instituição
     inst_resp <- tryCatch(api_get_institution_report(token, api_address, header_key),
@@ -4002,6 +5520,30 @@ server <- function(input, output, session) {
     institution_raw(inst_resp)
     authed(TRUE)
     removeModal()
+  })
+
+  observe({
+    req(authed(), session_role() == "institution")
+    can_see_triage <- identical(tolower(authed_email() %||% ""), "luana@cityvida.com.br")
+
+    if (can_see_triage && !isTRUE(triage_tab_visible())) {
+      insertTab(
+        inputId = "tabs",
+        tab = triage_tab_panel(),
+        target = "Medidas Moove",
+        position = "before",
+        select = FALSE
+      )
+      triage_tab_visible(TRUE)
+    }
+
+    if (!can_see_triage && isTRUE(triage_tab_visible())) {
+      removeTab(inputId = "tabs", target = triage_tab_label())
+      triage_tab_visible(FALSE)
+      if (identical(input$tabs, triage_tab_label())) {
+        updateTabsetPanel(session, "tabs", selected = "Medidas Moove")
+      }
+    }
   })
   
   observeEvent(scope_user_names(), {
@@ -4162,6 +5704,142 @@ server <- function(input, output, session) {
   
   observeEvent(input$sel_capacity, {perf_page(1)
   })
+
+  # ---- triage and activation ----
+  observeEvent(input$hc_triage_group_click, {
+    clicked_name <- input$hc_triage_group_click$name
+    gdf <- groups_from_api()
+    gid <- gdf$id[match(clicked_name, gdf$name)]
+    if (!is.na(gid)) {
+      triage_selected_group(as.integer(gid))
+      triage_view_mode("group")
+      triage_page(1L)
+    }
+  })
+
+  observeEvent(input$btn_triage_back, {
+    triage_selected_group(NA_integer_)
+    triage_view_mode("groups")
+    triage_page(1L)
+  })
+
+  observeEvent(triage_view_mode(), {
+    triage_page(1L)
+  }, ignoreInit = TRUE)
+
+  observeEvent(input$triage_prev, {
+    triage_page(clamp(triage_page() - 1L, 1L, 1e6))
+  })
+
+  observeEvent(input$triage_next, {
+    triage_page(triage_page() + 1L)
+  })
+
+  observeEvent(triage_selected_group_df(), {
+    d <- triage_selected_group_df()
+    req(nrow(d) > 0)
+
+    rng <- triage_date_bounds()
+    updateDateInput(session, "triage_date_start", value = rng$start, min = min(d$date, na.rm = TRUE), max = max(d$date, na.rm = TRUE))
+    updateDateInput(session, "triage_date_end", value = rng$end, min = min(d$date, na.rm = TRUE), max = max(d$date, na.rm = TRUE))
+  }, ignoreInit = TRUE)
+
+  observeEvent(list(triage_selected_group(), triage_sheet_df(), triage_view_mode(), triage_manager_mode()), {
+    req(identical(triage_view_mode(), "group"))
+    req(isTRUE(triage_manager_mode()))
+    vals <- triage_sheet_group_thresholds()
+
+    updateNumericInput(session, "triage_correct_yellow", value = as.numeric(vals[["triage_correct_yellow"]]))
+    updateNumericInput(session, "triage_correct_red", value = as.numeric(vals[["triage_correct_red"]]))
+    updateNumericInput(session, "triage_incorrect_yellow", value = as.numeric(vals[["triage_incorrect_yellow"]]))
+    updateNumericInput(session, "triage_incorrect_red", value = as.numeric(vals[["triage_incorrect_red"]]))
+    updateNumericInput(session, "triage_rt_yellow", value = as.numeric(vals[["triage_rt_yellow"]]))
+    updateNumericInput(session, "triage_rt_red", value = as.numeric(vals[["triage_rt_red"]]))
+  }, ignoreInit = TRUE)
+
+  observeEvent(list(input$triage_date_start, input$triage_date_end), {
+    if (is.null(input$triage_date_start) || is.null(input$triage_date_end)) return()
+    start_date <- as.Date(input$triage_date_start)
+    end_date   <- as.Date(input$triage_date_end)
+    if (is.na(start_date) || is.na(end_date) || start_date <= end_date) return()
+    updateDateInput(session, "triage_date_end", value = start_date)
+  }, ignoreInit = TRUE)
+
+  observeEvent(input$triage_refresh, {
+    req(authed(), session_role() == "institution")
+    memo_clear_all()
+    triage_refresh_tick(isolate(triage_refresh_tick()) + 1L)
+    showNotification("Dados de Triagem e Ativação atualizados.", type = "message", duration = 3)
+  }, ignoreInit = TRUE)
+
+  observeEvent(input$triage_save_thresholds, {
+    req(authed(), session_role() == "institution", isTRUE(triage_manager_mode()))
+    gid <- triage_selected_group()
+    req(!is.na(gid))
+
+    gdf <- groups_from_api()
+    gname <- gdf$name[match(as.integer(gid), gdf$id)] %||% ""
+
+    vals <- c(
+      triage_correct_yellow   = triage_correct_yellow(),
+      triage_correct_red      = triage_correct_red(),
+      triage_incorrect_yellow = triage_incorrect_yellow(),
+      triage_incorrect_red    = triage_incorrect_red(),
+      triage_rt_yellow        = triage_rt_yellow(),
+      triage_rt_red           = triage_rt_red()
+    )
+
+    ok <- save_triage_thresholds_for_group(
+      sheet_id = TRIAGE_SHEET_ID,
+      sheet_df = triage_sheet_df(),
+      group_id = as.integer(gid),
+      group_name = as.character(gname),
+      values_named = vals
+    )
+
+    if (isTRUE(ok)) {
+      triage_refresh_tick(isolate(triage_refresh_tick()) + 1L)
+      showNotification("Limites da triagem salvos na Google Sheet.", type = "message", duration = 4)
+    } else {
+      showNotification("Não foi possível salvar os limites da triagem na Google Sheet.", type = "error", duration = 6)
+    }
+  }, ignoreInit = TRUE)
+
+  observeEvent(plotly::event_data("plotly_click", source = "triage_panel"), {
+    ev <- plotly::event_data("plotly_click", source = "triage_panel")
+    req(!is.null(ev), nrow(ev) > 0)
+
+    available_dates <- sort(unique(triage_panel_df()$date))
+    req(length(available_dates) > 0)
+
+    raw_x <- ev$x[[1]]
+    clicked_date <- suppressWarnings(as.Date(raw_x, origin = "1970-01-01"))
+    if (is.na(clicked_date)) clicked_date <- suppressWarnings(as.Date(raw_x))
+    if (is.na(clicked_date)) {
+      clicked_num <- suppressWarnings(as.numeric(raw_x))
+      if (is.finite(clicked_num)) {
+        clicked_date <- as.Date(clicked_num / 86400000, origin = "1970-01-01")
+      }
+    }
+    req(!is.na(clicked_date))
+
+    nearest_date <- available_dates[which.min(abs(as.numeric(available_dates - clicked_date)))]
+    triage_selected_click_date(as.Date(nearest_date))
+
+    showModal(
+      modalDialog(
+        title = "Baixar Triagens da Data Selecionada",
+        sprintf("Data selecionada: %s", format(as.Date(nearest_date), "%d/%m/%Y")),
+        "Este download é separado do botão principal e baixará somente os dados desta data.",
+        footer = tagList(
+          modalButton("Cancelar"),
+          downloadButton("download_triage_selected_date_xlsx", "Confirmar e baixar", class = "btn btn-primary")
+        ),
+        easyClose = TRUE,
+        fade = TRUE
+      )
+    )
+  }, ignoreInit = TRUE)
   
   # ---- measurements -----
   
