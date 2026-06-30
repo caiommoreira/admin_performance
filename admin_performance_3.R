@@ -86,6 +86,7 @@ try({
 
 users                 <- tbl(pool, "users")
 user_groups           <- tbl(pool, "user_groups")
+user_related_users    <- tbl(pool, "user_related_users")
 legal_entity_users    <- tbl(pool, "legal_entity_users")
 user_question_answers <- tbl(pool, "user_question_answers") # Q37 para nome
 user_rankings         <- tbl(pool, "user_rankings")
@@ -150,6 +151,84 @@ get_user_ids_for_institution_or_group <- function(institution_id, group_id_or_al
   }
 }
 
+get_legal_entity_trainers <- function(sel_legal_entity_id) {
+  legal_entity_users %>%
+    filter(.data$legal_entity_id %in% !!as.integer(sel_legal_entity_id)) %>%
+    transmute(user_id = as.integer(.data$user_id)) %>%
+    distinct() %>%
+    inner_join(
+      users %>%
+        filter(.data$user_type == 4) %>%
+        transmute(user_id = as.integer(.data$id)),
+      by = "user_id"
+    ) %>%
+    collect() %>%
+    pull(.data$user_id)
+}
+
+get_legal_entity_trainers_users <- function(sel_legal_entity_trainers) {
+  if (length(sel_legal_entity_trainers) == 0) {
+    return(tibble::tibble(trainer_id = integer(), user_id = integer()))
+  }
+
+  cols <- tryCatch(colnames(user_related_users), error = function(e) character())
+  target_col <- c(
+    "related_user_id",
+    "user_related_user_id",
+    "target_user_id",
+    "member_user_id",
+    "child_user_id"
+  )
+  target_col <- target_col[target_col %in% cols]
+
+  if (!length(target_col)) {
+    user_cols <- setdiff(grep("user", cols, value = TRUE), "user_id")
+    target_col <- user_cols[seq_len(min(1L, length(user_cols)))]
+  }
+
+  if (!length(target_col)) {
+    return(tibble::tibble(trainer_id = integer(), user_id = integer()))
+  }
+
+  target_col <- target_col[[1]]
+
+  user_related_users %>%
+    filter(.data$user_id %in% !!as.integer(sel_legal_entity_trainers)) %>%
+    transmute(
+      trainer_id = as.integer(.data$user_id),
+      user_id = as.integer(!!rlang::sym(target_col))
+    ) %>%
+    filter(!is.na(.data$user_id)) %>%
+    distinct() %>%
+    collect()
+}
+
+get_user_ids_for_institution_or_grouping <- function(institution_id, grouping_id_or_all = "ALL", grouping_mode = "groups") {
+  if (!identical(grouping_mode, "trainers")) {
+    return(get_user_ids_for_institution_or_group(institution_id, grouping_id_or_all))
+  }
+
+  if (identical(grouping_id_or_all, "ALL")) {
+    return(get_user_ids_for_institution_or_group(institution_id, "ALL"))
+  }
+
+  trainer_users <- get_legal_entity_trainers_users(as.integer(grouping_id_or_all))
+  unique(as.integer(trainer_users$user_id))
+}
+
+grouping_label <- function(mode = "groups", plural = TRUE, title_case = FALSE) {
+  out <- if (identical(mode, "trainers")) {
+    if (isTRUE(plural)) "treinadores" else "treinador"
+  } else {
+    if (isTRUE(plural)) "grupos" else "grupo"
+  }
+
+  if (isTRUE(title_case)) {
+    paste0(toupper(substr(out, 1, 1)), substr(out, 2, nchar(out)))
+  } else {
+    out
+  }
+}
 get_names_for_users <- function(uids) {
   if (length(uids) == 0) return(tibble(user_id = integer(), name = character()))
   user_question_answers %>%
@@ -904,8 +983,10 @@ find_triage_threshold_sheet_name <- function(sheet_id) {
 
     if (is.null(probe) || !nrow(probe)) next
 
-    nm_low <- tolower(names(probe))
-    if (!all(c("measure", "value", "group", "group_id") %in% nm_low)) next
+        nm_low <- tolower(names(probe))
+    has_group_cols <- all(c("group", "group_id") %in% nm_low)
+    has_trainer_cols <- all(c("trainer", "trainer_id") %in% nm_low)
+    if (!all(c("measure", "value") %in% nm_low) || (!has_group_cols && !has_trainer_cols)) next
 
     probe_tbl <- tibble::as_tibble(probe)
     names(probe_tbl) <- nm_low
@@ -919,7 +1000,7 @@ find_triage_threshold_sheet_name <- function(sheet_id) {
   sheet_names[[1]]
 }
 
-read_triage_threshold_sheet <- function(sheet_id) {
+read_triage_threshold_sheet <- function(sheet_id, grouping_mode = "groups") {
   if (!isTRUE(gs4_auth_ok)) return(tibble::tibble())
 
   target_sheet <- SCREENING_THRESHOLDS_SHEET
@@ -933,18 +1014,35 @@ read_triage_threshold_sheet <- function(sheet_id) {
 
   if (is.null(out) || !nrow(out)) return(tibble::tibble())
 
-  tibble::as_tibble(out) %>%
-    dplyr::rename_with(tolower) %>%
+  out_tbl <- tibble::as_tibble(out) %>%
+    dplyr::rename_with(tolower)
+
+  if (!"measure" %in% names(out_tbl)) out_tbl$measure <- NA_character_
+  if (!"value" %in% names(out_tbl)) out_tbl$value <- NA_real_
+  if (!"group" %in% names(out_tbl)) out_tbl$group <- NA_character_
+  if (!"group_id" %in% names(out_tbl)) out_tbl$group_id <- NA_integer_
+  if (!"trainer" %in% names(out_tbl)) out_tbl$trainer <- NA_character_
+  if (!"trainer_id" %in% names(out_tbl)) out_tbl$trainer_id <- NA_integer_
+
+  out_tbl <- out_tbl %>%
     dplyr::mutate(
-      measure  = as.character(.data$measure),
-      value    = suppressWarnings(as.numeric(.data$value)),
-      group    = as.character(.data$group),
-      group_id = suppressWarnings(as.integer(.data$group_id))
-    ) %>%
-    dplyr::filter(
-      .data$measure %in% names(triage_threshold_defaults()),
-      !is.na(.data$value)
+      measure    = as.character(.data$measure),
+      value      = suppressWarnings(as.numeric(.data$value)),
+      group      = as.character(.data$group),
+      group_id   = suppressWarnings(as.integer(.data$group_id)),
+      trainer    = as.character(.data$trainer),
+      trainer_id = suppressWarnings(as.integer(.data$trainer_id))
     )
+
+  if (identical(grouping_mode, "trainers")) {
+    out_tbl <- out_tbl %>%
+      dplyr::mutate(
+        group = dplyr::coalesce(.data$trainer, .data$group),
+        group_id = dplyr::coalesce(.data$trainer_id, .data$group_id)
+      )
+  }
+
+  out_tbl
 }
 
 read_minigames_ranking_sheet <- function(sheet_id) {
@@ -1001,7 +1099,7 @@ resolve_triage_thresholds_for_group <- function(sheet_df, group_id = NA_integer_
   out
 }
 
-save_triage_thresholds_for_group <- function(sheet_id, sheet_df, group_id, group_name, values_named) {
+save_triage_thresholds_for_group <- function(sheet_id, sheet_df, group_id, group_name, values_named, grouping_mode = "groups") {
   if (!isTRUE(gs4_auth_ok)) return(FALSE)
 
   target_sheet <- SCREENING_THRESHOLDS_SHEET
@@ -1024,38 +1122,46 @@ save_triage_thresholds_for_group <- function(sheet_id, sheet_df, group_id, group
       measure = character(),
       value = numeric(),
       group = character(),
-      group_id = integer()
+      group_id = integer(),
+      trainer = character(),
+      trainer_id = integer()
     )
   }
 
-  if (!"measure" %in% names(base_df))  base_df$measure <- NA_character_
-  if (!"value" %in% names(base_df))    base_df$value <- NA_real_
-  if (!"group" %in% names(base_df))    base_df$group <- NA_character_
+  if (!"measure" %in% names(base_df)) base_df$measure <- NA_character_
+  if (!"value" %in% names(base_df)) base_df$value <- NA_real_
+  if (!"group" %in% names(base_df)) base_df$group <- NA_character_
   if (!"group_id" %in% names(base_df)) base_df$group_id <- NA_integer_
+  if (!"trainer" %in% names(base_df)) base_df$trainer <- NA_character_
+  if (!"trainer_id" %in% names(base_df)) base_df$trainer_id <- NA_integer_
 
   base_df <- base_df %>%
     dplyr::mutate(
       measure = as.character(.data$measure),
       value = suppressWarnings(as.numeric(.data$value)),
       group = as.character(.data$group),
-      group_id = suppressWarnings(as.integer(.data$group_id))
+      group_id = suppressWarnings(as.integer(.data$group_id)),
+      trainer = as.character(.data$trainer),
+      trainer_id = suppressWarnings(as.integer(.data$trainer_id))
     )
 
   out <- base_df
   gid <- as.integer(group_id)
   gname <- as.character(group_name %||% "")
+  name_col <- if (identical(grouping_mode, "trainers")) "trainer" else "group"
+  id_col <- if (identical(grouping_mode, "trainers")) "trainer_id" else "group_id"
 
   for (ms in matched) {
     hit_idx <- which(
-      !is.na(out$group_id) &
-        out$group_id == gid &
+      !is.na(out[[id_col]]) &
+        out[[id_col]] == gid &
         !is.na(out$measure) &
         out$measure == ms
     )
 
     if (!length(hit_idx) && nzchar(gname)) {
       hit_idx <- which(
-        tolower(dplyr::coalesce(out$group, "")) == tolower(gname) &
+        tolower(dplyr::coalesce(out[[name_col]], "")) == tolower(gname) &
           !is.na(out$measure) &
           out$measure == ms
       )
@@ -1064,15 +1170,15 @@ save_triage_thresholds_for_group <- function(sheet_id, sheet_df, group_id, group
     if (length(hit_idx)) {
       row_i <- hit_idx[[1]]
       out$value[row_i] <- as.numeric(values_named[[ms]])
-      out$group[row_i] <- gname
-      out$group_id[row_i] <- gid
+      out[[name_col]][row_i] <- gname
+      out[[id_col]][row_i] <- gid
     } else {
       new_row <- as.list(rep(NA, ncol(out)))
       names(new_row) <- names(out)
       new_row$measure <- ms
       new_row$value <- as.numeric(values_named[[ms]])
-      new_row$group <- gname
-      new_row$group_id <- gid
+      new_row[[name_col]] <- gname
+      new_row[[id_col]] <- gid
       out <- dplyr::bind_rows(out, tibble::as_tibble(new_row))
     }
   }
@@ -1697,13 +1803,79 @@ server <- function(input, output, session) {
     ) %>% arrange(name)
   })
   
-  # ---- users -----
+  grouping_mode <- reactive({
+    mode <- input$grouping_mode %||% "groups"
+    if (identical(mode, "trainers")) "trainers" else "groups"
+  })
+
+  grouping_scope_key <- reactive({
+    paste0(grouping_mode(), ":", input$sel_group %||% "ALL")
+  })
+
+  trainers_from_legal_entity <- reactive({
+    req(authed(), session_role() == "institution")
+    inst_id <- req(selected_institution_id())
+    trainer_ids <- unique(as.integer(get_legal_entity_trainers(inst_id)))
+
+    if (!length(trainer_ids)) {
+      return(tibble::tibble(id = integer(), name = character()))
+    }
+
+    nm_df <- get_names_for_users(trainer_ids)
+    nk_df <- get_nickname_for_users(trainer_ids)
+
+    tibble::tibble(id = trainer_ids) %>%
+      dplyr::left_join(nm_df, by = c("id" = "user_id")) %>%
+      dplyr::left_join(nk_df, by = c("id" = "user_id")) %>%
+      dplyr::mutate(name = dplyr::coalesce(.data$name, .data$nickname, paste0("user_", .data$id))) %>%
+      dplyr::select(id, name) %>%
+      dplyr::arrange(.data$name)
+  })
+
+  grouping_entities <- reactive({
+    req(authed(), session_role() == "institution")
+    if (identical(grouping_mode(), "trainers")) trainers_from_legal_entity() else groups_from_api()
+  })
+
+  grouping_user_links <- reactive({
+    req(authed(), session_role() == "institution")
+
+    if (identical(grouping_mode(), "trainers")) {
+      trainers <- grouping_entities()
+      links <- get_legal_entity_trainers_users(trainers$id)
+
+      if (!nrow(links) || !nrow(trainers)) {
+        return(tibble::tibble(user_id = integer(), group_id = integer(), group_name = character()))
+      }
+
+      links %>%
+        dplyr::transmute(user_id = as.integer(.data$user_id), group_id = as.integer(.data$trainer_id)) %>%
+        dplyr::distinct() %>%
+        dplyr::left_join(trainers %>% dplyr::rename(group_id = id, group_name = name), by = "group_id") %>%
+        dplyr::filter(!is.na(.data$group_name), .data$group_name != "")
+    } else {
+      g_api <- grouping_entities()
+      ug <- user_groups %>%
+        dplyr::transmute(user_id = as.integer(.data$user_id), group_id = as.integer(.data$group_id)) %>%
+        dplyr::distinct() %>%
+        dplyr::collect()
+
+      if (!nrow(ug) || !nrow(g_api)) {
+        return(tibble::tibble(user_id = integer(), group_id = integer(), group_name = character()))
+      }
+
+      ug %>%
+        dplyr::inner_join(g_api %>% dplyr::rename(group_id = id, group_name = name), by = "group_id") %>%
+        dplyr::filter(!is.na(.data$group_name), .data$group_name != "")
+    }
+  })
+    # ---- users -----
   
   scope_user_ids <- reactive({
     req(authed(), session_role() == "institution")
     inst_id <- req(selected_institution_id())
     choice  <- input$sel_group %||% "ALL"
-    get_user_ids_for_institution_or_group(inst_id, choice)
+    get_user_ids_for_institution_or_grouping(inst_id, choice, grouping_mode())
   })
   
   scope_user_names <- reactive({
@@ -1946,18 +2118,13 @@ server <- function(input, output, session) {
         age_on_eval = compute_age_on_date(dob, as.Date(evaluation_date))
       )
     
-    g_api <- groups_from_api()
-    ug <- user_groups %>%
-      filter(.data$user_id %in% !!as.integer(unique(rdcs_enriched$user_id))) %>%
-      transmute(user_id = as.integer(.data$user_id), group_id = as.integer(.data$group_id)) %>%
-      collect()
-    
-    if (nrow(ug) && nrow(g_api)) {
-      ug_named <- ug %>%
-        left_join(g_api %>% rename(group_id = id, group_name = name), by = "group_id") %>%
-        group_by(user_id) %>%
-        summarise(groups = paste(sort(unique(group_name[!is.na(group_name)])), collapse = ", "),
-                  .groups = "drop")
+    ug_named <- grouping_user_links() %>%
+      dplyr::filter(.data$user_id %in% !!as.integer(unique(rdcs_enriched$user_id))) %>%
+      dplyr::group_by(.data$user_id) %>%
+      dplyr::summarise(groups = paste(sort(unique(.data$group_name[!is.na(.data$group_name)])), collapse = ", "),
+                       .groups = "drop")
+
+    if (nrow(ug_named)) {
       rdcs_enriched <- rdcs_enriched %>% left_join(ug_named, by = "user_id")
     } else {
       rdcs_enriched$groups <- NA_character_
@@ -1995,17 +2162,11 @@ server <- function(input, output, session) {
       dplyr::group_by(user_id) %>%
       dplyr::summarise(value = mean(.data[[key]], na.rm = TRUE), .groups = "drop")
     
-    g_api <- groups_from_api()
-    ug <- user_groups %>%
+    ug_named <- grouping_user_links() %>%
       dplyr::filter(.data$user_id %in% !!as.integer(d_user$user_id)) %>%
-      dplyr::transmute(user_id = as.integer(.data$user_id), group_id = as.integer(.data$group_id)) %>%
-      dplyr::distinct() %>%
-      dplyr::collect()
-    
-    if (!nrow(ug) || !nrow(g_api)) { out <- tibble::tibble(group_id = integer(), group_name = character(), value = numeric()); cache_set(ck, out); return(out) }
-    
-    ug_named <- ug %>%
-      dplyr::inner_join(g_api %>% dplyr::rename(group_id = id, group_name = name), by = "group_id")
+      dplyr::distinct(.data$user_id, .data$group_id, .keep_all = TRUE)
+
+    if (!nrow(ug_named)) { out <- tibble::tibble(group_id = integer(), group_name = character(), value = numeric()); cache_set(ck, out); return(out) }
     
     out <- d_user %>%
       dplyr::left_join(ug_named, by = "user_id", relationship = "many-to-many") %>%
@@ -2031,11 +2192,10 @@ server <- function(input, output, session) {
     if (!nrow(d)) { out <- tibble::tibble(user_id = integer(), name = character(), value = numeric()); cache_set(ck, out); return(out) }
     if (key == "peripheral_vision") d <- d %>% dplyr::mutate(peripheral_vision = ifelse(peripheral_vision < 0, NA_real_, peripheral_vision))
     
-    ug_users <- user_groups %>%
+    ug_users <- grouping_user_links() %>%
       dplyr::filter(.data$group_id == !!as.integer(gid)) %>%
       dplyr::transmute(user_id = as.integer(.data$user_id)) %>%
-      dplyr::distinct() %>%
-      dplyr::collect()
+      dplyr::distinct()
     if (!nrow(ug_users)) { out <- tibble::tibble(user_id = integer(), name = character(), value = numeric()); cache_set(ck, out); return(out) }
     
     out <- d %>%
@@ -2211,27 +2371,14 @@ server <- function(input, output, session) {
                        game_name = as.character(name))
     
     # grupos do usuário (mapeia user_id -> "g1, g2, ...")
-    g_api <- groups_from_api()
-    ug <- user_groups %>%
+    ug_named <- grouping_user_links() %>%
       dplyr::filter(.data$user_id %in% !!unique(as.integer(d$user_id))) %>%
-      dplyr::transmute(user_id = as.integer(.data$user_id),
-                       group_id = as.integer(.data$group_id)) %>%
-      dplyr::distinct() %>%
-      dplyr::collect()
-    
-    ug_named <- if (nrow(ug) && nrow(g_api)) {
-      ug %>%
-        dplyr::left_join(g_api %>% dplyr::rename(group_id = id, group_name = name),
-                         by = "group_id") %>%
-        dplyr::group_by(user_id) %>%
-        dplyr::summarise(
-          groups = paste(sort(unique(group_name[!is.na(group_name) & group_name != ""])),
-                         collapse = ", "),
-          .groups = "drop"
-        )
-    } else {
-      tibble::tibble(user_id = integer(), groups = character())
-    }
+      dplyr::group_by(.data$user_id) %>%
+      dplyr::summarise(
+        groups = paste(sort(unique(.data$group_name[!is.na(.data$group_name) & .data$group_name != ""])),
+                       collapse = ", "),
+        .groups = "drop"
+      )
     
     # formata data/hora
     dt <- as.POSIXct(d$date_time, tz = "UTC")
@@ -2262,7 +2409,7 @@ server <- function(input, output, session) {
     req(authed(), session_role() == "institution", input$tabs == "Minigames")
     uids     <- scope_user_ids()
     inst_id  <- selected_institution_id()
-    choice   <- input$sel_group %||% "ALL"
+    choice   <- grouping_scope_key()
     get_moove_scores_data_cached(uids, inst_id, choice)
   })
   
@@ -2275,17 +2422,11 @@ server <- function(input, output, session) {
     d <- minigames_df()
     req(nrow(d) > 0)
     
-    g_api <- groups_from_api()
-    ug <- user_groups %>%
-      filter(.data$user_id %in% !!unique(d$user_id)) %>%
-      transmute(user_id = as.integer(.data$user_id), group_id = as.integer(.data$group_id)) %>%
-      distinct() %>%
-      collect()
-    
-    if (!nrow(ug) || !nrow(g_api)) return(tibble(group_id = integer(), group_name = character(), n = integer()))
-    
-    ug_named <- ug %>%
-      inner_join(g_api %>% rename(group_id = id, group_name = name), by = "group_id")
+        ug_named <- grouping_user_links() %>%
+      dplyr::filter(.data$user_id %in% !!unique(as.integer(d$user_id))) %>%
+      dplyr::distinct(.data$user_id, .data$group_id, .keep_all = TRUE)
+
+    if (!nrow(ug_named)) return(tibble(group_id = integer(), group_name = character(), n = integer()))
     
     d %>%
       left_join(ug_named, by = "user_id") %>%
@@ -2299,11 +2440,10 @@ server <- function(input, output, session) {
     gid <- mg_selected_group(); req(!is.na(gid))
     d <- minigames_df(); req(nrow(d) > 0)
     
-    ug_users <- user_groups %>%
-      filter(.data$group_id == !!as.integer(gid)) %>%
-      transmute(user_id = as.integer(.data$user_id)) %>%
-      distinct() %>%
-      collect()
+    ug_users <- grouping_user_links() %>%
+      dplyr::filter(.data$group_id == !!as.integer(gid)) %>%
+      dplyr::transmute(user_id = as.integer(.data$user_id)) %>%
+      dplyr::distinct()
     
     nm_df <- get_names_for_users(ug_users$user_id)
     
@@ -2339,7 +2479,7 @@ server <- function(input, output, session) {
     req(authed(), session_role() == "institution")
     uids     <- scope_user_ids()
     inst_id  <- selected_institution_id()
-    choice   <- input$sel_group %||% "ALL"
+    choice   <- grouping_scope_key()
     dfw <- get_user_settings_avg_percentiles_cached(uids, inst_id, choice)
     to_long_percentiles(dfw)
   })
@@ -2353,15 +2493,11 @@ server <- function(input, output, session) {
     cap <- input$sel_capacity; req(cap)
     d <- percentiles_long() %>% filter(capacity == cap)
     
-    ug <- user_groups %>%
-      transmute(user_id = as.integer(user_id), group_id = as.integer(group_id)) %>%
-      distinct() %>%
-      collect()
-    g_api <- groups_from_api()
-    
+        ug <- grouping_user_links() %>%
+      dplyr::distinct(.data$user_id, .data$group_id, .keep_all = TRUE)
+
     d %>%
       inner_join(ug, by = "user_id") %>%
-      inner_join(g_api %>% rename(group_id = id, group_name = name), by = "group_id") %>%
       group_by(group_id, group_name) %>%
       summarise(avg = mean(value, na.rm = TRUE), .groups = "drop") %>%
       filter(!is.na(group_name))
@@ -2373,11 +2509,10 @@ server <- function(input, output, session) {
     cap <- input$sel_capacity; req(cap)
     
     d <- percentiles_long() %>% filter(capacity == cap)
-    ug <- user_groups %>%
-      filter(group_id == !!gid) %>%
-      transmute(user_id = as.integer(user_id)) %>%
-      distinct() %>%
-      collect()
+    ug <- grouping_user_links() %>%
+      dplyr::filter(.data$group_id == !!gid) %>%
+      dplyr::transmute(user_id = as.integer(.data$user_id)) %>%
+      dplyr::distinct()
     nm_df <- get_names_for_users(ug$user_id)
     
     d %>%
@@ -2422,14 +2557,14 @@ server <- function(input, output, session) {
   triage_sheet_df <- reactive({
     req(authed(), session_role() == "institution", input$tabs == triage_tab_label())
     triage_refresh_tick()
-    read_triage_threshold_sheet(TRIAGE_SHEET_ID)
+    read_triage_threshold_sheet(TRIAGE_SHEET_ID, grouping_mode = grouping_mode())
   })
 
   triage_sheet_group_thresholds <- reactive({
     gid <- triage_selected_group()
     if (is.na(gid)) return(triage_threshold_defaults())
 
-    gdf <- groups_from_api()
+    gdf <- grouping_entities()
     gname <- gdf$name[match(as.integer(gid), gdf$id)]
     resolve_triage_thresholds_for_group(
       sheet_df = triage_sheet_df(),
@@ -2484,19 +2619,13 @@ server <- function(input, output, session) {
     d <- triage_raw_df()
     req(nrow(d) > 0)
 
-    g_api <- groups_from_api()
-    ug <- user_groups %>%
+        ug_named <- grouping_user_links() %>%
       dplyr::filter(.data$user_id %in% !!unique(as.integer(d$user_id))) %>%
-      dplyr::transmute(user_id = as.integer(.data$user_id), group_id = as.integer(.data$group_id)) %>%
-      dplyr::distinct() %>%
-      dplyr::collect()
+      dplyr::distinct(.data$user_id, .data$group_id, .keep_all = TRUE)
 
-    if (!nrow(ug) || !nrow(g_api)) {
+    if (!nrow(ug_named)) {
       return(tibble::tibble(group_id = integer(), group_name = character(), n = integer()))
     }
-
-    ug_named <- ug %>%
-      dplyr::inner_join(g_api %>% dplyr::rename(group_id = id, group_name = name), by = "group_id")
 
     d %>%
       dplyr::left_join(ug_named, by = "user_id") %>%
@@ -2509,18 +2638,17 @@ server <- function(input, output, session) {
     gid <- triage_selected_group()
     req(!is.na(gid))
 
-    user_groups %>%
+    grouping_user_links() %>%
       dplyr::filter(.data$group_id == !!as.integer(gid)) %>%
       dplyr::transmute(user_id = as.integer(.data$user_id)) %>%
-      dplyr::distinct() %>%
-      dplyr::collect()
+      dplyr::distinct()
   })
 
   triage_selected_group_name <- reactive({
     gid <- triage_selected_group()
     req(!is.na(gid))
 
-    gdf <- groups_from_api()
+    gdf <- grouping_entities()
     as.character(gdf$name[match(as.integer(gid), gdf$id)] %||% "")
   })
 
@@ -2742,16 +2870,11 @@ server <- function(input, output, session) {
     
     d <- d %>% dplyr::filter(.data$measurement_id == !!mid)
     
-    g_api <- groups_from_api()
-    ug <- user_groups %>%
-      dplyr::filter(.data$user_id %in% !!unique(d$user_id)) %>%
-      dplyr::transmute(user_id = as.integer(.data$user_id), group_id = as.integer(.data$group_id)) %>%
-      dplyr::distinct() %>%
-      dplyr::collect()
-    
-    if (!nrow(ug) || !nrow(g_api)) return(tibble::tibble(group_id = integer(), group_name = character(), value = numeric()))
-    
-    ug_named <- ug %>% dplyr::inner_join(g_api %>% dplyr::rename(group_id = id, group_name = name), by = "group_id")
+        ug_named <- grouping_user_links() %>%
+      dplyr::filter(.data$user_id %in% !!unique(as.integer(d$user_id))) %>%
+      dplyr::distinct(.data$user_id, .data$group_id, .keep_all = TRUE)
+
+    if (!nrow(ug_named)) return(tibble::tibble(group_id = integer(), group_name = character(), value = numeric()))
     
     d %>%
       dplyr::left_join(ug_named, by = "user_id") %>%
@@ -2768,11 +2891,10 @@ server <- function(input, output, session) {
     d <- mm_df(); req(nrow(d) > 0)
     d <- d %>% dplyr::filter(.data$measurement_id == !!mid)
     
-    ug_users <- user_groups %>%
+    ug_users <- grouping_user_links() %>%
       dplyr::filter(.data$group_id == !!gid) %>%
       dplyr::transmute(user_id = as.integer(.data$user_id)) %>%
-      dplyr::distinct() %>%
-      dplyr::collect()
+      dplyr::distinct()
     
     if (!nrow(ug_users)) return(tibble::tibble(user_id = integer(), name = character(), value = numeric()))
     
@@ -2908,27 +3030,14 @@ server <- function(input, output, session) {
       dplyr::transmute(user_id, user_name = name)
     
     # grupos do usuário (user_id -> "g1, g2, ...")
-    g_api <- groups_from_api()
-    ug <- user_groups %>%
+    ug_named <- grouping_user_links() %>%
       dplyr::filter(.data$user_id %in% !!unique(as.integer(d$user_id))) %>%
-      dplyr::transmute(user_id = as.integer(.data$user_id),
-                       group_id = as.integer(.data$group_id)) %>%
-      dplyr::distinct() %>%
-      dplyr::collect()
-    
-    ug_named <- if (nrow(ug) && nrow(g_api)) {
-      ug %>%
-        dplyr::left_join(g_api %>% dplyr::rename(group_id = id, group_name = name),
-                         by = "group_id") %>%
-        dplyr::group_by(user_id) %>%
-        dplyr::summarise(
-          groups = paste(sort(unique(group_name[!is.na(group_name) & group_name != ""])),
-                         collapse = ", "),
-          .groups = "drop"
-        )
-    } else {
-      tibble::tibble(user_id = integer(), groups = character())
-    }
+      dplyr::group_by(.data$user_id) %>%
+      dplyr::summarise(
+        groups = paste(sort(unique(.data$group_name[!is.na(.data$group_name) & .data$group_name != ""])),
+                       collapse = ", "),
+        .groups = "drop"
+      )
     
     df <- d %>%
       dplyr::left_join(nm, by = "user_id") %>%
@@ -3128,35 +3237,23 @@ server <- function(input, output, session) {
     # ---------------------------------------------
     inst_users <- get_user_ids_for_institution_or_group(inst_id, "ALL")
     
-    # ---------------------------------------------
-    # 3. Usuários do grupo selecionado
-    # ---------------------------------------------
     group_choice <- input$resp_group %||% "ALL"
-    group_users  <- get_user_ids_for_institution_or_group(inst_id, group_choice)
+    group_users  <- get_user_ids_for_institution_or_grouping(inst_id, group_choice, grouping_mode())
+    bucket_label <- grouping_label(grouping_mode(), plural = FALSE, title_case = TRUE)
     
-    # ---------------------------------------------
-    # 4. Usuário individual ou não?
-    #    "ALL_GROUP" → Grupo vs Instituição
-    #    user_id     → Usuário vs Grupo
-    # ---------------------------------------------
     user_choice <- input$resp_user %||% "ALL_GROUP"
     
     if (identical(user_choice, "ALL_GROUP") || !nzchar(as.character(user_choice))) {
-      
-      # Caso padrão → Grupo vs Instituição
       pop1_users <- as.integer(group_users)
       pop2_users <- as.integer(inst_users)
-      pop1_label <- "Grupo"
+      pop1_label <- bucket_label
       pop2_label <- "Instituição"
-      
     } else {
-      
-      # Caso detalhado → Usuário vs Grupo
       uid        <- as.integer(user_choice)
       pop1_users <- uid
       pop2_users <- as.integer(group_users)
       pop1_label <- "Usuário"
-      pop2_label <- "Grupo"
+      pop2_label <- bucket_label
     }
     
     # restringe a base só aos usuários usados na comparação
@@ -3236,9 +3333,18 @@ server <- function(input, output, session) {
       inst_name <- tryCatch(as.character(d$institution_name), error = function(e) NA_character_)
       inst_id   <- tryCatch(as.integer(d$institution_id),   error = function(e) NA_integer_)
       
-      div(style="padding:10px; border:1px solid #eee; border-radius:8px; background:#fafafa; margin-bottom:8px;",
+            div(style="padding:10px; border:1px solid #eee; border-radius:8px; background:#fafafa; margin-bottom:8px;",
           tags$b("Status"), tags$br(),
-          span("Instituição: ", inst_name), tags$br()
+          span("Instituição: ", inst_name), tags$br(),
+          tags$div(style = "margin-top:8px;",
+            radioButtons(
+              "grouping_mode",
+              label = "Agrupamento",
+              choices = c("Grupos" = "groups", "Treinadores" = "trainers"),
+              selected = input$grouping_mode %||% "groups",
+              inline = TRUE
+            )
+          )
       )
     } else {
       div(style="padding:10px; border:1px solid #eee; border-radius:8px; background:#fafafa; margin-bottom:8px;",
@@ -5262,23 +5368,19 @@ server <- function(input, output, session) {
   })
   
   output$ui_resp_groups <- renderUI({
-    inst <- institution_dt()
-    req(inst)
-    
-    # grupos vêm de inst$data$groups
-    groups_list <- inst$groups
-    
-    # names = ids, values = nomes
-    group_choices <- as.integer(names(groups_list))
-    names(group_choices) <- unlist(groups_list, use.names = FALSE)
-    
-    group_choices <- group_choices[order(names(group_choices))]
-    
+    groups_df <- grouping_entities()
+    req(nrow(groups_df) > 0)
+
+    group_choices <- groups_df$id
+    names(group_choices) <- groups_df$name
+    current <- input$resp_group %||% ""
+    selected <- if (nzchar(as.character(current)) && current %in% as.character(group_choices)) current else group_choices[1]
+
     selectInput(
       "resp_group",
-      label = "Grupo:",
+      label = paste0(grouping_label(grouping_mode(), plural = FALSE, title_case = TRUE), ":"),
       choices = group_choices,
-      selected = group_choices[1],
+      selected = selected,
       width = "100%"
     )
   })
@@ -5289,18 +5391,17 @@ server <- function(input, output, session) {
     inst_id <- selected_institution_id()
     gid     <- input$resp_group
     
-    group_uids <- get_user_ids_for_institution_or_group(inst_id, gid)
-    
+    group_uids <- get_user_ids_for_institution_or_grouping(inst_id, gid, grouping_mode())
     group_uids <- get_names_for_users(group_uids)
     
-    choices_all <- c("Todos do grupo" = "ALL_GROUP")
+    choices_all <- c("Todos do agrupamento" = "ALL_GROUP")
+    choices <- choices_all
     
-    if (nrow(group_uids)>0) {
-      choices <- group_uids$user_id
-      names(choices) <- group_uids$name
+    if (nrow(group_uids) > 0) {
+      extra_choices <- group_uids$user_id
+      names(extra_choices) <- group_uids$name
+      choices <- c(choices_all, extra_choices)
     }
-    
-    choices <- c(choices_all,choices)
     
     selectInput(
       "resp_user",
@@ -5323,12 +5424,12 @@ server <- function(input, output, session) {
     
     inst_name   <- institution_dt()$institution_name %||% "Instituição"
     
-    group_label <- unlist(institution_dt()$groups, use.names = FALSE)[
-      as.integer(names(institution_dt()$groups)) == as.integer(input$resp_group)
-    ] %||% "Grupo"
+    bucket_label <- grouping_label(grouping_mode(), plural = FALSE, title_case = TRUE)
+    grouping_df  <- grouping_entities()
+    group_label  <- grouping_df$name[match(as.integer(input$resp_group), grouping_df$id)] %||% bucket_label
     
     if (is.null(input$resp_user) || input$resp_user == "ALL_GROUP") {
-      user_label <- "Todos do grupo"
+      user_label <- "Todos do agrupamento"
     } else {
       user_label <- get_names_for_users(as.integer(input$resp_user))$name
     }
@@ -5340,11 +5441,7 @@ server <- function(input, output, session) {
     max_pct <- max(df$pct, na.rm = TRUE)
     
     # níveis fixos para o fill
-    values_all <- c(
-      "Grupo"       = "#93C5FD",  # azul acinzentado
-      "Instituição" = "#4B5563",  # cinza escuro
-      "Usuário"     = "#da4a11"   # azul para usuário
-    )
+    values_all <- c(stats::setNames("#93C5FD", bucket_label), "Instituição" = "#4B5563", "Usuário" = "#da4a11")
     
     df <- df %>%
       dplyr::mutate(
@@ -5354,8 +5451,8 @@ server <- function(input, output, session) {
     # -------------------------- labels da legenda --------------------------
     legend_labels <- character(0)
     
-    if ("Grupo" %in% as.character(df$grupo)) {
-      legend_labels["Grupo"] <- paste0("Grupo: ", group_label)
+    if (bucket_label %in% as.character(df$grupo)) {
+      legend_labels[bucket_label] <- paste0(bucket_label, ": ", group_label)
     }
     if ("Instituição" %in% as.character(df$grupo)) {
       legend_labels["Instituição"] <- paste0("Instituição: ", inst_name)
@@ -5558,6 +5655,29 @@ server <- function(input, output, session) {
       selected = character(0) # nenhum selecionado = "todos"
     )
   }, ignoreInit = TRUE)
+
+  observeEvent(grouping_mode(), {
+    memo_clear_all()
+    cache_clear(EVAL_CACHE_PREFIX)
+    eval_selected_group(NA_integer_)
+    eval_selected_user(NA_integer_)
+    mg_selected_group(NA_integer_)
+    mg_selected_user(NA_integer_)
+    perf_selected_group(NA_integer_)
+    triage_selected_group(NA_integer_)
+    mm_selected_group(NA_integer_)
+    mm_selected_user(NA_integer_)
+    eval_view_mode("groups")
+    mg_view_mode("groups")
+    perf_view_mode("groups")
+    triage_view_mode("groups")
+    mm_view_mode("groups")
+    eval_page(1L)
+    mg_page(1L)
+    perf_page(1)
+    triage_page(1L)
+    mm_page(1L)
+  }, ignoreInit = TRUE)
   
   # ---- cache ----
   
@@ -5582,7 +5702,7 @@ server <- function(input, output, session) {
   observeEvent(input$hc_eval_group_click, {
     req(authed(), session_role() == "institution", input$tabs == "Avaliações")
     clicked_name <- input$hc_eval_group_click$name
-    gdf <- groups_from_api()
+    gdf <- grouping_entities()
     gid <- gdf$id[match(clicked_name, gdf$name)]
     if (!is.na(gid)) {
       eval_selected_group(as.integer(gid))
@@ -5640,7 +5760,7 @@ server <- function(input, output, session) {
   
   observeEvent(input$hc_mg_group_click, {
     clicked_name <- input$hc_mg_group_click$name
-    gdf <- groups_from_api()
+    gdf <- grouping_entities()
     gid <- gdf$id[match(clicked_name, gdf$name)]
     if (!is.na(gid)) {
       mg_selected_group(as.integer(gid))
@@ -5677,7 +5797,7 @@ server <- function(input, output, session) {
   
   observeEvent(input$hc_perf_group_click, {
     clicked <- input$hc_perf_group_click$name
-    gdf <- groups_from_api()
+    gdf <- grouping_entities()
     gid <- gdf$id[match(clicked, gdf$name)]
     if (!is.na(gid)) {
       perf_selected_group(as.integer(gid))
@@ -5708,7 +5828,7 @@ server <- function(input, output, session) {
   # ---- triage and activation ----
   observeEvent(input$hc_triage_group_click, {
     clicked_name <- input$hc_triage_group_click$name
-    gdf <- groups_from_api()
+    gdf <- grouping_entities()
     gid <- gdf$id[match(clicked_name, gdf$name)]
     if (!is.na(gid)) {
       triage_selected_group(as.integer(gid))
@@ -5777,7 +5897,7 @@ server <- function(input, output, session) {
     gid <- triage_selected_group()
     req(!is.na(gid))
 
-    gdf <- groups_from_api()
+    gdf <- grouping_entities()
     gname <- gdf$name[match(as.integer(gid), gdf$id)] %||% ""
 
     vals <- c(
@@ -5789,12 +5909,13 @@ server <- function(input, output, session) {
       triage_rt_red           = triage_rt_red()
     )
 
-    ok <- save_triage_thresholds_for_group(
+        ok <- save_triage_thresholds_for_group(
       sheet_id = TRIAGE_SHEET_ID,
       sheet_df = triage_sheet_df(),
       group_id = as.integer(gid),
       group_name = as.character(gname),
-      values_named = vals
+      values_named = vals,
+      grouping_mode = grouping_mode()
     )
 
     if (isTRUE(ok)) {
@@ -5846,7 +5967,7 @@ server <- function(input, output, session) {
   observeEvent(input$hc_mm_group_click, {
     req(authed(), session_role() == "institution", input$tabs == "Medidas Moove")
     clicked_name <- input$hc_mm_group_click$name
-    gdf <- groups_from_api()
+    gdf <- grouping_entities()
     gid <- gdf$id[match(clicked_name, gdf$name)]
     if (!is.na(gid)) {
       mm_selected_group(as.integer(gid))
