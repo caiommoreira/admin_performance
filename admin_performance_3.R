@@ -48,6 +48,7 @@ if (!is.na(gs4_auth_path) && nzchar(gs4_auth_path)) {
 TRIAGE_SHEET_ID <- "10knuvOilqvyuW948M5xm8sDnkB2BHxk2fM7R7mOqk5o"
 SCREENING_THRESHOLDS_SHEET <- "screening_thresholds"
 MINIGAMES_RANKING_SHEET <- "minigames_ranking"
+TRAINER_TAGS_SHEET <- "trainer_tags"
 app_title <- "Sensorial – Admin Performance (alpha)"
 
 api_address <- "https://admin.sensorial.life/"
@@ -90,6 +91,9 @@ user_related_users    <- tbl(pool, "user_related_users")
 legal_entity_users    <- tbl(pool, "legal_entity_users")
 user_question_answers <- tbl(pool, "user_question_answers") # Q37 para nome
 user_rankings         <- tbl(pool, "user_rankings")
+tag_templates_tbl     <- tbl(pool, "tag_templates")
+trainings_tbl         <- tbl(pool, "trainings")
+training_tag_completions_tbl <- tbl(pool, "training_tag_completions")
 # --------------------- helpers ---------------------------------
 
 # ---- login -----
@@ -562,6 +566,24 @@ triage_tab_panel <- function() {
   )
 }
 
+triage_report_tab_label <- function() {
+  paste0("Relat", intToUtf8(243), "rio Triagem - Ativa", intToUtf8(231), intToUtf8(227), "o")
+}
+
+triage_report_tab_panel <- function() {
+  tabPanel(
+    triage_report_tab_label(),
+    br(),
+    fluidRow(
+      column(4),
+      column(4, selectInput("triage_report_unit", "Unit", choices = character(0))),
+      column(4)
+    ),
+    br(),
+    uiOutput("ui_triage_report_content")
+  )
+}
+
 emoji_img <- function(filename, size = 18) {
   # filename ex.: "feliz.png" ou "feliz.svg"
   sprintf(
@@ -1023,6 +1045,7 @@ read_triage_threshold_sheet <- function(sheet_id, grouping_mode = "groups") {
   if (!"group_id" %in% names(out_tbl)) out_tbl$group_id <- NA_integer_
   if (!"trainer" %in% names(out_tbl)) out_tbl$trainer <- NA_character_
   if (!"trainer_id" %in% names(out_tbl)) out_tbl$trainer_id <- NA_integer_
+  if (!"unit" %in% names(out_tbl)) out_tbl$unit <- NA_character_
 
   out_tbl <- out_tbl %>%
     dplyr::mutate(
@@ -1043,6 +1066,69 @@ read_triage_threshold_sheet <- function(sheet_id, grouping_mode = "groups") {
   }
 
   out_tbl
+}
+
+read_trainer_tags_sheet <- function(sheet_id) {
+  if (!isTRUE(gs4_auth_ok)) return(tibble::tibble())
+
+  target_sheet <- TRAINER_TAGS_SHEET
+
+  if (is.na(target_sheet) || !nzchar(target_sheet)) return(tibble::tibble())
+
+  out <- tryCatch(
+    googlesheets4::read_sheet(sheet_id, sheet = target_sheet),
+    error = function(e) tibble::tibble()
+  )
+
+  if (is.null(out) || !nrow(out)) return(tibble::tibble())
+
+  tibble::as_tibble(out) %>%
+    dplyr::rename_with(tolower) %>%
+    dplyr::mutate(
+      trainer_id = suppressWarnings(as.integer(.data$trainer_id)),
+      tag_id = suppressWarnings(as.integer(.data$tag_id))
+    ) %>%
+    dplyr::filter(!is.na(.data$trainer_id), !is.na(.data$tag_id)) %>%
+    dplyr::distinct()
+}
+
+parse_training_ids_array <- function(x) {
+  if (length(x) == 0 || is.null(x)) return(integer())
+
+  val <- x[[1]]
+
+  if (is.null(val) || length(val) == 0) return(integer())
+
+  if (is.list(val)) {
+    val <- unlist(val, recursive = TRUE, use.names = FALSE)
+  }
+
+  if (is.numeric(val) || is.integer(val)) {
+    return(unique(as.integer(val[!is.na(val)])))
+  }
+
+  txt <- trimws(as.character(val)[1])
+  if (!nzchar(txt) || txt %in% c("NA", "NULL")) return(integer())
+
+  parsed <- tryCatch(jsonlite::fromJSON(txt), error = function(e) NULL)
+  if (!is.null(parsed)) {
+    parsed_ids <- suppressWarnings(as.integer(unlist(parsed, recursive = TRUE, use.names = FALSE)))
+    return(unique(parsed_ids[!is.na(parsed_ids)]))
+  }
+
+  matches <- regmatches(txt, gregexpr("[0-9]+", txt))[[1]]
+  if (!length(matches)) return(integer())
+
+  unique(as.integer(matches))
+}
+
+empty_triage_training_rings_df <- function() {
+  tibble::tibble(
+    user_id = integer(),
+    date = as.Date(character()),
+    training_ring_color = character(),
+    training_names = character()
+  )
 }
 
 read_minigames_ranking_sheet <- function(sheet_id) {
@@ -1275,6 +1361,126 @@ build_triage_distribution_plot <- function(df, value_col, title_txt, xlab_txt,
       plot.title = ggplot2::element_text(face = "bold", hjust = 0.5),
       plot.subtitle = ggplot2::element_text(hjust = 0.5),
       panel.grid.minor = ggplot2::element_blank()
+    )
+}
+
+format_triage_report_unit_title <- function(unit_name) {
+  unit_name <- trimws(as.character(unit_name %||% ""))
+  if (!nzchar(unit_name)) return("")
+  if (grepl("^Usina\\s+", unit_name, ignore.case = TRUE)) unit_name else paste("Usina", unit_name)
+}
+
+build_triage_monthly_table <- function(df, date_col = "date", count_name = "triagens") {
+  month_col <- paste0("M", intToUtf8(234), "s")
+
+  if (is.null(df) || !nrow(df) || !date_col %in% names(df)) {
+    return(tibble::tibble())
+  }
+
+  date_vals <- as.Date(df[[date_col]])
+  out <- tibble::tibble(date = date_vals) %>%
+    dplyr::filter(!is.na(.data$date)) %>%
+    dplyr::mutate(
+      year = lubridate::year(.data$date),
+      month_num = lubridate::month(.data$date),
+      month_lab = lubridate::month(.data$date, label = TRUE, abbr = TRUE)
+    ) %>%
+    dplyr::count(.data$year, .data$month_num, .data$month_lab, name = count_name) %>%
+    tidyr::pivot_wider(
+      names_from = "year",
+      values_from = count_name,
+      values_fill = 0
+    ) %>%
+    dplyr::arrange(.data$month_num)
+
+  names(out)[names(out) == "month_lab"] <- month_col
+  out <- out %>% dplyr::select(-"month_num")
+
+  monthly_with_totals(out, month_label = month_col)
+}
+
+report_triage_quantiles <- function(df) {
+  q_num <- function(x, probs) {
+    stats::quantile(as.numeric(x), probs = probs, na.rm = TRUE, names = FALSE, type = 7)
+  }
+
+  list(
+    correct_red = q_num(df$correct_responses_per_minute, 0.10),
+    correct_yellow = q_num(df$correct_responses_per_minute, 0.25),
+    incorrect_yellow = q_num(df$incorrect_responses_per_minute, 0.75),
+    incorrect_red = q_num(df$incorrect_responses_per_minute, 0.90),
+    rt_yellow = q_num(df$average_response_time, 0.75),
+    rt_red = q_num(df$average_response_time, 0.90)
+  )
+}
+
+classify_triage_sessions_observed <- function(df, qs) {
+  df %>%
+    dplyr::mutate(
+      correct_stamp = dplyr::case_when(
+        .data$correct_responses_per_minute <= qs$correct_red ~ "red",
+        .data$correct_responses_per_minute < qs$correct_yellow ~ "yellow",
+        TRUE ~ "white"
+      ),
+      incorrect_stamp = dplyr::case_when(
+        .data$incorrect_responses_per_minute > qs$incorrect_red ~ "red",
+        .data$incorrect_responses_per_minute > qs$incorrect_yellow ~ "yellow",
+        TRUE ~ "white"
+      ),
+      rt_stamp = dplyr::case_when(
+        .data$average_response_time > qs$rt_red ~ "red",
+        .data$average_response_time > qs$rt_yellow ~ "yellow",
+        TRUE ~ "white"
+      ),
+      yellow_count = (.data$correct_stamp == "yellow") + (.data$incorrect_stamp == "yellow") + (.data$rt_stamp == "yellow"),
+      stamp_color = dplyr::case_when(
+        .data$correct_stamp == "red" | .data$incorrect_stamp == "red" | .data$rt_stamp == "red" ~ "red",
+        .data$yellow_count >= 2 ~ "orange",
+        .data$yellow_count == 1 ~ "yellow",
+        TRUE ~ "white"
+      ),
+      severity_rank = triage_stamp_rank(.data$stamp_color)
+    )
+}
+
+build_triage_heatmap_plot <- function(df) {
+  if (is.null(df) || !nrow(df)) {
+    return(
+      ggplot2::ggplot() +
+        ggplot2::theme_minimal(base_size = 14) +
+        ggplot2::labs(title = "Mapa de calor das triagens", x = "Hora", y = "Dia da Semana")
+    )
+  }
+
+  weekday_labels <- c("domingo", "segunda-feira", "terca-feira", "quarta-feira", "quinta-feira", "sexta-feira", "sabado")
+  weekday_levels <- rev(weekday_labels)
+
+  grid_df <- tidyr::expand_grid(
+    weekday = factor(weekday_levels, levels = weekday_levels),
+    hour_num = 0:23
+  )
+
+  heat_df <- df %>%
+    dplyr::mutate(
+      hour_num = suppressWarnings(as.integer(.data$hour)),
+      weekday_num = lubridate::wday(.data$date, week_start = 7),
+      weekday = factor(weekday_labels[.data$weekday_num], levels = weekday_levels)
+    ) %>%
+    dplyr::filter(!is.na(.data$hour_num), .data$hour_num >= 0, .data$hour_num <= 23, !is.na(.data$weekday)) %>%
+    dplyr::count(.data$weekday, .data$hour_num, name = "n")
+
+  grid_df %>%
+    dplyr::left_join(heat_df, by = c("weekday", "hour_num")) %>%
+    dplyr::mutate(n = dplyr::coalesce(.data$n, 0L)) %>%
+    ggplot2::ggplot(ggplot2::aes(x = .data$hour_num, y = .data$weekday, fill = .data$n)) +
+    ggplot2::geom_tile(color = NA) +
+    ggplot2::scale_x_continuous(breaks = 0:23) +
+    ggplot2::scale_fill_gradient(low = "#440154", high = "#FDE725") +
+    ggplot2::labs(title = "Mapa de calor das triagens", x = "Hora", y = "Dia da Semana", fill = "Triagens") +
+    ggplot2::theme_minimal(base_size = 14) +
+    ggplot2::theme(
+      plot.title = ggplot2::element_text(face = "bold", hjust = 0.5),
+      panel.grid = ggplot2::element_blank()
     )
 }
 
@@ -1708,8 +1914,7 @@ ui <- fluidPage(
                     uiOutput("ui_triage_detail")
                   ),
                   
-                  # ---- measurements -----
-                  
+                                  
                   tabPanel(
                     "Medidas Moove",
                     br(),
@@ -1774,6 +1979,7 @@ server <- function(input, output, session) {
   institution_raw <- reactiveVal(NULL)        # lista completa do content (parsed)
   authed_email    <- reactiveVal(NA_character_)
   triage_tab_visible <- reactiveVal(TRUE)
+  triage_report_tab_visible <- reactiveVal(FALSE)
   
   # ---- institution and groups -----
   
@@ -2772,6 +2978,496 @@ server <- function(input, output, session) {
       )
   })
 
+  trainer_tags_sheet_df <- reactive({
+    req(authed(), session_role() == "institution", input$tabs == triage_tab_label())
+    triage_refresh_tick()
+    read_trainer_tags_sheet(TRIAGE_SHEET_ID)
+  })
+
+  triage_training_rings_df <- reactive({
+    req(authed(), session_role() == "institution", input$tabs == triage_tab_label())
+    req(input$triage_date_start, input$triage_date_end)
+
+    if (!identical(grouping_mode(), "trainers")) {
+      return(empty_triage_training_rings_df())
+    }
+
+    trainer_id <- as.integer(triage_selected_group())
+    if (is.na(trainer_id)) return(empty_triage_training_rings_df())
+
+    trainer_tags <- trainer_tags_sheet_df()
+    tag_ids <- trainer_tags %>%
+      dplyr::filter(.data$trainer_id == trainer_id) %>%
+      dplyr::pull(.data$tag_id)
+
+    tag_ids <- unique(as.integer(tag_ids[!is.na(tag_ids)]))
+    if (!length(tag_ids)) return(empty_triage_training_rings_df())
+    tag_id <- tag_ids[[1]]
+
+    tag_template <- tag_templates_tbl %>%
+      dplyr::filter(.data$tag_id == !!tag_id | .data$id == !!tag_id) %>%
+      dplyr::select(id, tag_id, training_ids_array) %>%
+      collect()
+
+    if (!nrow(tag_template)) return(empty_triage_training_rings_df())
+
+    training_ids <- parse_training_ids_array(tag_template$training_ids_array[[1]])
+    if (!length(training_ids)) return(empty_triage_training_rings_df())
+
+    training_lookup <- trainings_tbl %>%
+      dplyr::filter(.data$id %in% !!as.integer(training_ids)) %>%
+      dplyr::transmute(
+        training_id = as.integer(.data$id),
+        training_name = as.character(.data$name)
+      ) %>%
+      collect() %>%
+      dplyr::right_join(
+        tibble::tibble(training_id = as.integer(training_ids)),
+        by = "training_id"
+      ) %>%
+      dplyr::mutate(
+        training_order = match(.data$training_id, as.integer(training_ids)),
+        training_name = dplyr::coalesce(.data$training_name, paste0("training_", .data$training_id)),
+        training_ring_color = dplyr::case_when(
+          .data$training_order == 1L ~ "#f2c94c",
+          .data$training_order == 2L ~ "#f2994a",
+          .data$training_order >= 3L ~ "#eb5757",
+          TRUE ~ "#f2c94c"
+        )
+      )
+
+    user_ids <- unique(as.integer(triage_selected_group_users()$user_id))
+    if (!length(user_ids)) return(empty_triage_training_rings_df())
+
+    completions <- training_tag_completions_tbl %>%
+      dplyr::filter(
+        .data$user_id %in% !!user_ids,
+        .data$training_id %in% !!as.integer(training_ids)
+      ) %>%
+      dplyr::transmute(
+        user_id = as.integer(.data$user_id),
+        tag_id = as.integer(.data$tag_id),
+        training_id = as.integer(.data$training_id),
+        completed_at = dplyr::coalesce(.data$created_at, .data$updated_at)
+      ) %>%
+      collect()
+
+    if (!nrow(completions)) return(empty_triage_training_rings_df())
+
+    if ("tag_id" %in% names(completions) && any(completions$tag_id == tag_id, na.rm = TRUE)) {
+      completions <- completions %>%
+        dplyr::filter(.data$tag_id == tag_id)
+    }
+
+    start_date <- as.Date(input$triage_date_start)
+    end_date   <- as.Date(input$triage_date_end)
+
+    completions %>%
+      dplyr::mutate(date = as.Date(.data$completed_at)) %>%
+      dplyr::filter(!is.na(.data$date), .data$date >= start_date, .data$date <= end_date) %>%
+      dplyr::left_join(training_lookup, by = "training_id") %>%
+      dplyr::arrange(.data$user_id, .data$date, dplyr::desc(.data$training_order), .data$training_id) %>%
+      dplyr::group_by(.data$user_id, .data$date) %>%
+      dplyr::summarise(
+        training_ring_color = dplyr::first(.data$training_ring_color),
+        training_names = paste(unique(.data$training_name), collapse = ", "),
+        .groups = "drop"
+      )
+  })
+
+  triage_training_debug <- reactive({
+    req(authed(), session_role() == "institution", input$tabs == triage_tab_label())
+    req(input$triage_date_start, input$triage_date_end)
+
+    empty_preview <- tibble::tibble(
+      user_id = integer(),
+      name = character(),
+      date = as.Date(character()),
+      hour = character(),
+      stamp_color = character(),
+      training_ring_color = character(),
+      training_names = character()
+    )
+
+    if (!identical(grouping_mode(), "trainers")) {
+      return(list(lines = c("Agrupamento atual: grupos", "Debug de treino/tag desativado fora do modo treinadores."), preview = empty_preview))
+    }
+
+    trainer_id <- as.integer(triage_selected_group())
+    if (is.na(trainer_id)) {
+      return(list(lines = c("Treinador selecionado: <none>"), preview = empty_preview))
+    }
+
+    trainer_tags <- trainer_tags_sheet_df()
+    trainer_tag_rows <- trainer_tags %>%
+      dplyr::filter(.data$trainer_id == trainer_id)
+
+    tag_ids <- unique(as.integer(trainer_tag_rows$tag_id[!is.na(trainer_tag_rows$tag_id)]))
+    tag_id <- if (length(tag_ids)) tag_ids[[1]] else NA_integer_
+
+    tag_template <- if (!is.na(tag_id)) {
+      tag_templates_tbl %>%
+        dplyr::filter(.data$tag_id == !!tag_id | .data$id == !!tag_id) %>%
+        dplyr::select(id, tag_id, training_ids_array) %>%
+        collect()
+    } else {
+      tibble::tibble()
+    }
+
+    training_ids <- if (nrow(tag_template)) parse_training_ids_array(tag_template$training_ids_array[[1]]) else integer()
+
+    training_lookup <- if (length(training_ids)) {
+      trainings_tbl %>%
+        dplyr::filter(.data$id %in% !!as.integer(training_ids)) %>%
+        dplyr::transmute(
+          training_id = as.integer(.data$id),
+          training_name = as.character(.data$name)
+        ) %>%
+        collect() %>%
+        dplyr::right_join(
+          tibble::tibble(training_id = as.integer(training_ids)),
+          by = "training_id"
+        ) %>%
+        dplyr::mutate(
+          training_order = match(.data$training_id, as.integer(training_ids)),
+          training_name = dplyr::coalesce(.data$training_name, paste0("training_", .data$training_id)),
+          training_ring_color = dplyr::case_when(
+            .data$training_order == 1L ~ "#f2c94c",
+            .data$training_order == 2L ~ "#f2994a",
+            .data$training_order >= 3L ~ "#eb5757",
+            TRUE ~ "#f2c94c"
+          )
+        )
+    } else {
+      tibble::tibble(training_id = integer(), training_name = character(), training_order = integer(), training_ring_color = character())
+    }
+
+    user_ids <- unique(as.integer(triage_selected_group_users()$user_id))
+
+    completions_raw <- if (length(user_ids) && length(training_ids)) {
+      training_tag_completions_tbl %>%
+        dplyr::filter(
+          .data$user_id %in% !!user_ids,
+          .data$training_id %in% !!as.integer(training_ids)
+        ) %>%
+        dplyr::transmute(
+          user_id = as.integer(.data$user_id),
+          tag_id = as.integer(.data$tag_id),
+          training_id = as.integer(.data$training_id),
+          completed_at = dplyr::coalesce(.data$created_at, .data$updated_at)
+        ) %>%
+        collect()
+    } else {
+      tibble::tibble(user_id = integer(), tag_id = integer(), training_id = integer(), completed_at = as.POSIXct(character()))
+    }
+
+    completions_tag <- completions_raw
+    if (!is.na(tag_id) && "tag_id" %in% names(completions_tag) && any(completions_tag$tag_id == tag_id, na.rm = TRUE)) {
+      completions_tag <- completions_tag %>%
+        dplyr::filter(.data$tag_id == tag_id)
+    }
+
+    start_date <- as.Date(input$triage_date_start)
+    end_date   <- as.Date(input$triage_date_end)
+
+    completions_range <- completions_tag %>%
+      dplyr::mutate(date = as.Date(.data$completed_at)) %>%
+      dplyr::filter(!is.na(.data$date), .data$date >= start_date, .data$date <= end_date)
+
+    rings_df <- if (nrow(completions_range)) {
+      completions_range %>%
+        dplyr::left_join(training_lookup, by = "training_id") %>%
+        dplyr::arrange(.data$user_id, .data$date, dplyr::desc(.data$training_order), .data$training_id) %>%
+        dplyr::group_by(.data$user_id, .data$date) %>%
+        dplyr::summarise(
+          training_ring_color = dplyr::first(.data$training_ring_color),
+          training_names = paste(unique(.data$training_name), collapse = ", "),
+          .groups = "drop"
+        )
+    } else {
+      empty_triage_training_rings_df()
+    }
+
+    panel_matches <- if (nrow(rings_df)) {
+      triage_panel_df() %>%
+        dplyr::select("user_id", "name", "date", "hour", "stamp_color") %>%
+        dplyr::inner_join(rings_df, by = c("user_id", "date")) %>%
+        dplyr::arrange(.data$date, .data$name)
+    } else {
+      empty_preview
+    }
+
+    lines <- c(
+      paste0("trainer_id selecionado: ", trainer_id),
+      paste0("linhas trainer_tags para o treinador: ", nrow(trainer_tag_rows)),
+      paste0("tag_ids encontrados: ", if (length(tag_ids)) paste(tag_ids, collapse = ", ") else "<nenhum>"),
+      paste0("linhas em tag_templates: ", nrow(tag_template)),
+      paste0("training_ids extraidos: ", if (length(training_ids)) paste(training_ids, collapse = ", ") else "<nenhum>"),
+      paste0("treinos resolvidos em trainings: ", nrow(training_lookup)),
+      paste0("usuarios do treinador: ", length(user_ids)),
+      paste0("training_tag_completions bruto: ", nrow(completions_raw)),
+      paste0("training_tag_completions apos filtro de tag: ", nrow(completions_tag)),
+      paste0("training_tag_completions no intervalo de datas: ", nrow(completions_range)),
+      paste0("pares user_id + data com treino/tag: ", nrow(rings_df)),
+      paste0("matches efetivos com triagens do painel: ", nrow(panel_matches))
+    )
+
+    list(lines = lines, preview = panel_matches)
+  })
+
+  triage_report_sheet_df <- reactive({
+    req(authed(), session_role() == "institution", input$tabs == triage_report_tab_label())
+    triage_refresh_tick()
+    read_triage_threshold_sheet(TRIAGE_SHEET_ID, grouping_mode = "trainers")
+  })
+
+  triage_report_units <- reactive({
+    df <- triage_report_sheet_df()
+    df %>%
+      dplyr::filter(!is.na(.data$unit), nzchar(trimws(.data$unit))) %>%
+      dplyr::distinct(.data$unit) %>%
+      dplyr::arrange(.data$unit) %>%
+      dplyr::pull(.data$unit)
+  })
+
+  observeEvent(triage_report_units(), {
+    units <- triage_report_units()
+    selected_unit <- input$triage_report_unit
+    if (is.null(selected_unit) || !selected_unit %in% units) {
+      selected_unit <- units[[1]] %||% character(0)
+    }
+    updateSelectInput(session, "triage_report_unit", choices = units, selected = selected_unit)
+  }, ignoreInit = FALSE)
+
+  triage_report_unit_trainers <- reactive({
+    req(input$triage_report_unit)
+    triage_report_sheet_df() %>%
+      dplyr::filter(.data$unit == input$triage_report_unit) %>%
+      dplyr::filter(!is.na(.data$trainer_id), !is.na(.data$trainer), nzchar(trimws(.data$trainer))) %>%
+      dplyr::transmute(
+        trainer_id = as.integer(.data$trainer_id),
+        trainer_name = as.character(.data$trainer),
+        unit = as.character(.data$unit)
+      ) %>%
+      dplyr::distinct() %>%
+      dplyr::arrange(.data$trainer_name)
+  })
+
+  triage_report_trainer_links <- reactive({
+    trainers <- triage_report_unit_trainers()
+    req(nrow(trainers) > 0)
+    get_legal_entity_trainers_users(trainers$trainer_id) %>%
+      dplyr::inner_join(trainers, by = "trainer_id")
+  })
+
+  triage_report_raw_df <- reactive({
+    req(authed(), session_role() == "institution", input$tabs == triage_report_tab_label())
+    links <- triage_report_trainer_links()
+    req(nrow(links) > 0)
+
+    uids <- unique(as.integer(links$user_id))
+    inst_id <- selected_institution_id()
+    choice <- paste0("triage-report:", input$triage_report_unit %||% "")
+
+    get_moove_scores_raw_data_cached(uids, inst_id, choice) %>%
+      dplyr::mutate(
+        played_at = suppressWarnings(lubridate::ymd_hms(.data$date_time, tz = "UTC", quiet = TRUE)),
+        played_at = dplyr::coalesce(.data$played_at, suppressWarnings(as.POSIXct(.data$date_time, tz = "UTC"))),
+        date = dplyr::coalesce(as.Date(.data$played_at), as.Date(substr(as.character(.data$date_time), 1, 10))),
+        hour = substr(as.character(.data$date_time), 12, 13)
+      )
+  })
+
+  triage_report_reports <- reactive({
+    req(authed(), session_role() == "institution", input$tabs == triage_report_tab_label())
+    trainers <- triage_report_unit_trainers()
+    links <- triage_report_trainer_links()
+    raw_df <- triage_report_raw_df()
+
+    if (!nrow(trainers) || !nrow(links) || !nrow(raw_df)) {
+      return(list())
+    }
+
+    user_ids <- unique(as.integer(links$user_id))
+    name_df <- get_names_for_users(user_ids)
+    nick_df <- get_nickname_for_users(user_ids)
+    trainer_tags_df <- read_trainer_tags_sheet(TRIAGE_SHEET_ID)
+
+    user_names <- tibble::tibble(user_id = user_ids) %>%
+      dplyr::left_join(name_df, by = "user_id") %>%
+      dplyr::left_join(nick_df, by = "user_id") %>%
+      dplyr::mutate(display_name = dplyr::coalesce(.data$nickname, .data$name, paste0("user_", .data$user_id))) %>%
+      dplyr::select("user_id", "display_name")
+
+    report_list <- vector("list", nrow(trainers))
+
+    for (i in seq_len(nrow(trainers))) {
+      trainer_row <- trainers[i, , drop = FALSE]
+      trainer_id <- as.integer(trainer_row$trainer_id[[1]])
+      trainer_name <- as.character(trainer_row$trainer_name[[1]])
+
+      trainer_links <- links %>%
+        dplyr::filter(.data$trainer_id == trainer_id) %>%
+        dplyr::distinct(.data$user_id)
+
+      trainer_users <- trainer_links %>%
+        dplyr::left_join(user_names, by = "user_id") %>%
+        dplyr::arrange(.data$display_name)
+
+      trainer_df <- raw_df %>%
+        dplyr::filter(.data$user_id %in% trainer_links$user_id) %>%
+        dplyr::left_join(trainer_users, by = "user_id") %>%
+        dplyr::mutate(name = dplyr::coalesce(.data$display_name, paste0("user_", .data$user_id)))
+
+      if (!nrow(trainer_df)) {
+        report_list[[i]] <- list(
+          trainer_id = trainer_id,
+          trainer_name = trainer_name,
+          user_names = trainer_users$display_name,
+          raw_df = tibble::tibble(),
+          quantiles = NULL,
+          daily_triages = tibble::tibble(),
+          demand_df = tibble::tibble(),
+          performed_df = tibble::tibble(),
+          monthly_df = tibble::tibble(),
+          heat_df = tibble::tibble(),
+          total_triages = 0L,
+          avg_triages_per_day = 0,
+          demand_n = 0L,
+          activation_n = 0L,
+          triage_color_counts = c(yellow = 0L, orange = 0L, red = 0L),
+          activation_color_counts = c(yellow = 0L, orange = 0L, red = 0L)
+        )
+        next
+      }
+
+      qs <- report_triage_quantiles(trainer_df)
+      processed_df <- classify_triage_sessions_observed(trainer_df, qs)
+
+      daily_triages <- processed_df %>%
+        dplyr::arrange(.data$user_id, .data$date, dplyr::desc(.data$severity_rank), dplyr::desc(.data$played_at)) %>%
+        dplyr::group_by(.data$user_id, .data$name, .data$date) %>%
+        dplyr::summarise(
+          stamp_color = dplyr::first(.data$stamp_color),
+          hour = dplyr::first(.data$hour),
+          severity_rank = dplyr::first(.data$severity_rank),
+          .groups = "drop"
+        )
+
+      trainer_tag_rows <- trainer_tags_df %>%
+        dplyr::filter(.data$trainer_id == trainer_id)
+      tag_ids <- unique(as.integer(trainer_tag_rows$tag_id[!is.na(trainer_tag_rows$tag_id)]))
+      tag_id <- if (length(tag_ids)) tag_ids[[1]] else NA_integer_
+
+      activations_df <- empty_triage_training_rings_df()
+      if (!is.na(tag_id)) {
+        tag_template <- tag_templates_tbl %>%
+          dplyr::filter(.data$tag_id == !!tag_id | .data$id == !!tag_id) %>%
+          dplyr::select(id, tag_id, training_ids_array) %>%
+          collect()
+
+        if (nrow(tag_template)) {
+          training_ids <- parse_training_ids_array(tag_template$training_ids_array[[1]])
+
+          if (length(training_ids)) {
+            training_lookup <- trainings_tbl %>%
+              dplyr::filter(.data$id %in% !!as.integer(training_ids)) %>%
+              dplyr::transmute(
+                training_id = as.integer(.data$id),
+                training_name = as.character(.data$name)
+              ) %>%
+              collect() %>%
+              dplyr::right_join(tibble::tibble(training_id = as.integer(training_ids)), by = "training_id") %>%
+              dplyr::mutate(
+                training_order = match(.data$training_id, as.integer(training_ids)),
+                training_name = dplyr::coalesce(.data$training_name, paste0("training_", .data$training_id)),
+                training_ring_color = dplyr::case_when(
+                  .data$training_order == 1L ~ "#f2c94c",
+                  .data$training_order == 2L ~ "#f2994a",
+                  .data$training_order >= 3L ~ "#eb5757",
+                  TRUE ~ "#f2c94c"
+                )
+              )
+
+            completions <- training_tag_completions_tbl %>%
+              dplyr::filter(
+                .data$user_id %in% !!unique(as.integer(trainer_links$user_id)),
+                .data$training_id %in% !!as.integer(training_ids)
+              ) %>%
+              dplyr::transmute(
+                user_id = as.integer(.data$user_id),
+                tag_id = as.integer(.data$tag_id),
+                training_id = as.integer(.data$training_id),
+                completed_at = dplyr::coalesce(.data$created_at, .data$updated_at)
+              ) %>%
+              collect()
+
+            if (nrow(completions)) {
+              if ("tag_id" %in% names(completions) && any(completions$tag_id == tag_id, na.rm = TRUE)) {
+                completions <- completions %>%
+                  dplyr::filter(.data$tag_id == tag_id)
+              }
+
+              activations_df <- completions %>%
+                dplyr::mutate(date = as.Date(.data$completed_at)) %>%
+                dplyr::filter(!is.na(.data$date)) %>%
+                dplyr::left_join(training_lookup, by = "training_id") %>%
+                dplyr::arrange(.data$user_id, .data$date, dplyr::desc(.data$training_order), .data$training_id) %>%
+                dplyr::group_by(.data$user_id, .data$date) %>%
+                dplyr::summarise(
+                  training_ring_color = dplyr::first(.data$training_ring_color),
+                  training_names = paste(unique(.data$training_name), collapse = ", "),
+                  .groups = "drop"
+                )
+            }
+          }
+        }
+      }
+
+      demand_df <- daily_triages %>%
+        dplyr::filter(.data$stamp_color != "white")
+
+      performed_df <- demand_df %>%
+        dplyr::inner_join(activations_df, by = c("user_id", "date"))
+
+      daily_counts <- trainer_df %>%
+        dplyr::count(.data$date, name = "n")
+
+      triage_color_counts <- c(
+        yellow = sum(demand_df$stamp_color == "yellow", na.rm = TRUE),
+        orange = sum(demand_df$stamp_color == "orange", na.rm = TRUE),
+        red = sum(demand_df$stamp_color == "red", na.rm = TRUE)
+      )
+
+      activation_color_counts <- c(
+        yellow = sum(performed_df$training_ring_color == "#f2c94c", na.rm = TRUE),
+        orange = sum(performed_df$training_ring_color == "#f2994a", na.rm = TRUE),
+        red = sum(performed_df$training_ring_color == "#eb5757", na.rm = TRUE)
+      )
+
+      report_list[[i]] <- list(
+        trainer_id = trainer_id,
+        trainer_name = trainer_name,
+        user_names = trainer_users$display_name,
+        raw_df = trainer_df,
+        quantiles = qs,
+        daily_triages = daily_triages,
+        demand_df = demand_df,
+        performed_df = performed_df,
+        monthly_df = build_triage_monthly_table(trainer_df, date_col = "date", count_name = "triagens"),
+        heat_df = trainer_df,
+        total_triages = nrow(trainer_df),
+        avg_triages_per_day = if (nrow(daily_counts)) mean(daily_counts$n) else 0,
+        demand_n = nrow(demand_df),
+        activation_n = nrow(performed_df),
+        triage_color_counts = triage_color_counts,
+        activation_color_counts = activation_color_counts
+      )
+    }
+
+    report_list
+  })
+
   triage_download_base_df <- reactive({
     req(triage_processed_df())
     d <- triage_processed_df()
@@ -2826,7 +3522,6 @@ server <- function(input, output, session) {
     )
   })
   
-  # ---- measurements -----
   
   mm_df <- reactive({
     req(authed(), session_role() == "institution", input$tabs == "Medidas Moove")
@@ -4612,6 +5307,10 @@ server <- function(input, output, session) {
         column(12, uiOutput("ui_triage_panel_plot"))
       ),
       br(),
+      fluidRow(
+        column(12, uiOutput("ui_triage_training_debug"))
+      ),
+      br(),
       div(
         style = "display:flex; justify-content:center; margin: 8px 0 16px 0;",
         downloadButton("download_triage_xlsx", "Baixar triagens derivadas (XLSX)", class = "btn btn-primary")
@@ -4626,6 +5325,19 @@ server <- function(input, output, session) {
     div(
       style = "max-height:900px; overflow-y:auto; overflow-x:hidden; border:1px solid #e5e5e5; border-radius:8px; padding:8px; background:#fff;",
       plotlyOutput("plt_triage_panel", height = paste0(dims$height, "px"), width = "100%")
+    )
+  })
+
+  output$ui_triage_training_debug <- renderUI({
+    req(authed(), session_role() == "institution", input$tabs == triage_tab_label())
+
+    if (!identical(grouping_mode(), "trainers")) return(NULL)
+
+    div(
+      style = "border:1px solid #e5e5e5; border-radius:8px; padding:12px; background:#fff;",
+      tags$h4("Debug treino/tag", style = "margin-top:0; text-align:center; font-weight:700;"),
+      verbatimTextOutput("txt_triage_training_debug"),
+      DTOutput("tbl_triage_training_debug")
     )
   })
 
@@ -4732,11 +5444,25 @@ server <- function(input, output, session) {
   })
 
   output$plt_triage_panel <- renderPlotly({
-    req(authed(), session_role() == "institution", input$tabs == "Triagem e Ativação")
+    req(authed(), session_role() == "institution", input$tabs == triage_tab_label())
     df <- triage_panel_df()
     req(nrow(df) > 0)
     group_name <- triage_selected_group_name()
     req(nzchar(group_name))
+
+    bucket_label <- grouping_label(grouping_mode(), plural = FALSE, title_case = FALSE)
+    ring_df <- triage_training_rings_df()
+
+    if (nrow(ring_df)) {
+      df <- df %>%
+        dplyr::left_join(ring_df, by = c("user_id", "date"))
+    } else {
+      df <- df %>%
+        dplyr::mutate(
+          training_ring_color = NA_character_,
+          training_names = NA_character_
+        )
+    }
 
     date_breaks <- sort(unique(df$date))
     name_levels <- sort(unique(as.character(df$name)), na.last = TRUE)
@@ -4749,11 +5475,34 @@ server <- function(input, output, session) {
           "Apelido: ", .data$name,
           "<br>Data: ", .data$date_label,
           "<br>Hora: ", .data$hour,
-          "<br>Cor: ", .data$stamp_color
+          "<br>Cor: ", .data$stamp_color,
+          dplyr::if_else(
+            !is.na(.data$training_names) & nzchar(.data$training_names),
+            paste0("<br>Treinos da tag: ", .data$training_names),
+            ""
+          )
         )
       )
 
-    p <- ggplot2::ggplot(df, ggplot2::aes(x = .data$date, y = .data$name, text = .data$hover_txt)) +
+    ring_points <- df %>%
+      dplyr::filter(!is.na(.data$training_ring_color), .data$training_ring_color != "")
+
+    p <- ggplot2::ggplot(df, ggplot2::aes(x = .data$date, y = .data$name, text = .data$hover_txt))
+
+    if (nrow(ring_points)) {
+      p <- p +
+        ggplot2::geom_point(
+          data = ring_points,
+          ggplot2::aes(color = .data$training_ring_color),
+          shape = 21,
+          fill = NA,
+          size = 13.2,
+          stroke = 2,
+          show.legend = FALSE
+        )
+    }
+
+    p <- p +
       ggplot2::geom_point(
         ggplot2::aes(fill = .data$stamp_color),
         shape = 21,
@@ -4773,7 +5522,7 @@ server <- function(input, output, session) {
         labels = function(x) format(x, "%d/%m/%Y")
       ) +
       ggplot2::labs(
-        title = paste0("Painel de triagens do grupo ", group_name),
+        title = paste0("Painel de triagens do ", bucket_label, " ", group_name),
         x = NULL,
         y = NULL
       ) +
@@ -4785,10 +5534,145 @@ server <- function(input, output, session) {
       )
 
     plotly::ggplotly(p, tooltip = "text", source = "triage_panel") %>%
+      plotly::event_register("plotly_click") %>%
       plotly::layout(
         dragmode = "pan",
         showlegend = FALSE
       )
+  })
+
+  output$txt_triage_training_debug <- renderPrint({
+    req(authed(), session_role() == "institution", input$tabs == triage_tab_label())
+    dbg <- triage_training_debug()
+    cat(paste(dbg$lines, collapse = "\n"), "\n")
+  })
+
+  output$tbl_triage_training_debug <- DT::renderDT({
+    req(authed(), session_role() == "institution", input$tabs == triage_tab_label())
+    dbg <- triage_training_debug()
+
+    DT::datatable(
+      dbg$preview,
+      rownames = FALSE,
+      options = list(pageLength = 10, scrollX = TRUE)
+    )
+  })
+
+  output$ui_triage_report_content <- renderUI({
+    req(authed(), session_role() == "institution", input$tabs == triage_report_tab_label())
+    reports <- triage_report_reports()
+
+    if (!length(reports)) {
+      return(
+        div(
+          style = "padding:12px; border:1px solid #eee; border-radius:8px; background:#fafafa; text-align:center;",
+          "Nenhum dado disponivel para a unit selecionada."
+        )
+      )
+    }
+
+    tagList(
+      tags$h2(format_triage_report_unit_title(input$triage_report_unit %||% ""), style = "text-align:center; font-weight:700;"),
+      lapply(seq_along(reports), function(i) {
+        report <- reports[[i]]
+        tid <- if (is.na(report$trainer_id)) i else as.integer(report$trainer_id)
+
+        tagList(
+          if (i > 1) tags$hr(style = "margin:28px 0;"),
+          tags$h3(paste0("Treinador: ", report$trainer_name)),
+          tags$p(tags$b("Usuarios: "), if (length(report$user_names)) paste(report$user_names, collapse = ", ") else "Nenhum usuario associado."),
+          fluidRow(
+            column(3, tags$p(tags$b("Numero de triagens realizadas: "), format(report$total_triages, big.mark = ".", decimal.mark = ","))),
+            column(3, tags$p(tags$b("Media de triagens por dia: "), format(round(report$avg_triages_per_day, 2), nsmall = 2, decimal.mark = ","))),
+            column(3, tags$p(tags$b("Numero de triagens que demandava ativacao: "), format(report$demand_n, big.mark = ".", decimal.mark = ","))),
+            column(3, tags$p(tags$b("Numero de ativacoes realizadas: "), format(report$activation_n, big.mark = ".", decimal.mark = ",")))
+          ),
+          fluidRow(
+            column(4, tags$p(tags$b("Numero de triagens classificadas como ativacao amarela: "), format(report$triage_color_counts[["yellow"]], big.mark = ".", decimal.mark = ","))),
+            column(4, tags$p(tags$b("Numero de triagens classificadas como ativacao laranja: "), format(report$triage_color_counts[["orange"]], big.mark = ".", decimal.mark = ","))),
+            column(4, tags$p(tags$b("Numero de triagens classificadas como ativacao vermelha: "), format(report$triage_color_counts[["red"]], big.mark = ".", decimal.mark = ",")))
+          ),
+          fluidRow(
+            column(4, tags$p(tags$b("Numero de ativacoes amarelas: "), format(report$activation_color_counts[["yellow"]], big.mark = ".", decimal.mark = ","))),
+            column(4, tags$p(tags$b("Numero de ativacoes laranjas: "), format(report$activation_color_counts[["orange"]], big.mark = ".", decimal.mark = ","))),
+            column(4, tags$p(tags$b("Numero de ativacoes vermelhas: "), format(report$activation_color_counts[["red"]], big.mark = ".", decimal.mark = ",")))
+          ),
+          tags$h4("Distribuicao das metricas das triagens", style = "margin-top:18px;"),
+          fluidRow(
+            column(4, plotOutput(paste0("triage_report_correct_", tid), height = "320px")),
+            column(4, plotOutput(paste0("triage_report_incorrect_", tid), height = "320px")),
+            column(4, plotOutput(paste0("triage_report_rt_", tid), height = "320px"))
+          ),
+          tags$h4("Triagens por mes", style = "margin-top:18px;"),
+          DTOutput(paste0("triage_report_monthly_", tid)),
+          tags$h4("Mapa de calor das triagens", style = "margin-top:18px;"),
+          plotOutput(paste0("triage_report_heat_", tid), height = "360px")
+        )
+      })
+    )
+  })
+
+  observe({
+    req(authed(), session_role() == "institution", input$tabs == triage_report_tab_label())
+    reports <- triage_report_reports()
+
+    for (i in seq_along(reports)) {
+      local({
+        report <- reports[[i]]
+        tid <- if (is.na(report$trainer_id)) i else as.integer(report$trainer_id)
+
+        output[[paste0("triage_report_correct_", tid)]] <- renderPlot({
+          df <- report$raw_df
+          if (is.null(df) || !nrow(df)) return(print(ggplot2::ggplot()))
+          qs <- report$quantiles
+          observed_specs <- tibble::tibble(
+            value = c(qs$correct_red, qs$correct_yellow),
+            label = c(sprintf("P10 %.1f", qs$correct_red), sprintf("P25 %.1f", qs$correct_yellow)),
+            color = c("red", "#F1C40F")
+          )
+          subtitle_txt <- sprintf("P10 observado: %.1f | P25 observado: %.1f", qs$correct_red, qs$correct_yellow)
+          print(build_triage_distribution_plot(df, "correct_responses_per_minute", "Distribuicao das respostas corretas por minuto", "Numero de respostas corretas por minuto", observed_specs = observed_specs, threshold_specs = NULL, subtitle_txt = subtitle_txt))
+        })
+
+        output[[paste0("triage_report_incorrect_", tid)]] <- renderPlot({
+          df <- report$raw_df
+          if (is.null(df) || !nrow(df)) return(print(ggplot2::ggplot()))
+          qs <- report$quantiles
+          observed_specs <- tibble::tibble(
+            value = c(qs$incorrect_red, qs$incorrect_yellow),
+            label = c(sprintf("P90 %.1f", qs$incorrect_red), sprintf("P75 %.1f", qs$incorrect_yellow)),
+            color = c("red", "#F1C40F")
+          )
+          subtitle_txt <- sprintf("P75 observado: %.1f | P90 observado: %.1f", qs$incorrect_yellow, qs$incorrect_red)
+          print(build_triage_distribution_plot(df, "incorrect_responses_per_minute", "Distribuicao das respostas incorretas por minuto", "Numero de respostas incorretas por minuto", observed_specs = observed_specs, threshold_specs = NULL, subtitle_txt = subtitle_txt))
+        })
+
+        output[[paste0("triage_report_rt_", tid)]] <- renderPlot({
+          df <- report$raw_df
+          if (is.null(df) || !nrow(df)) return(print(ggplot2::ggplot()))
+          qs <- report$quantiles
+          observed_specs <- tibble::tibble(
+            value = c(qs$rt_red, qs$rt_yellow),
+            label = c(sprintf("P90 %.1f", qs$rt_red), sprintf("P75 %.1f", qs$rt_yellow)),
+            color = c("red", "#F1C40F")
+          )
+          subtitle_txt <- sprintf("P75 observado: %.1f | P90 observado: %.1f", qs$rt_yellow, qs$rt_red)
+          print(build_triage_distribution_plot(df, "average_response_time", "Distribuicao dos Tempos de Resposta (ms)", "Tempo de resposta (ms)", observed_specs = observed_specs, threshold_specs = NULL, subtitle_txt = subtitle_txt))
+        })
+
+        output[[paste0("triage_report_monthly_", tid)]] <- DT::renderDT({
+          DT::datatable(
+            report$monthly_df,
+            rownames = FALSE,
+            options = list(paging = FALSE, searching = FALSE, ordering = FALSE, dom = "t", scrollX = TRUE)
+          )
+        })
+
+        output[[paste0("triage_report_heat_", tid)]] <- renderPlot({
+          print(build_triage_heatmap_plot(report$heat_df))
+        })
+      })
+    }
   })
 
   output$download_triage_xlsx <- downloadHandler(
@@ -4832,7 +5716,6 @@ server <- function(input, output, session) {
     }
   )
   
-  # ---- measurements -----
   
   output$ui_mm_status <- renderUI({
     req(authed(), session_role() == "institution", input$tabs == "Medidas Moove")
@@ -5634,6 +6517,25 @@ server <- function(input, output, session) {
       triage_tab_visible(TRUE)
     }
 
+    if (can_see_triage && !isTRUE(triage_report_tab_visible())) {
+      insertTab(
+        inputId = "tabs",
+        tab = triage_report_tab_panel(),
+        target = triage_tab_label(),
+        position = "after",
+        select = FALSE
+      )
+      triage_report_tab_visible(TRUE)
+    }
+
+    if (!can_see_triage && isTRUE(triage_report_tab_visible())) {
+      removeTab(inputId = "tabs", target = triage_report_tab_label())
+      triage_report_tab_visible(FALSE)
+      if (identical(input$tabs, triage_report_tab_label())) {
+        updateTabsetPanel(session, "tabs", selected = "Medidas Moove")
+      }
+    }
+
     if (!can_see_triage && isTRUE(triage_tab_visible())) {
       removeTab(inputId = "tabs", target = triage_tab_label())
       triage_tab_visible(FALSE)
@@ -5881,7 +6783,7 @@ server <- function(input, output, session) {
     if (is.null(input$triage_date_start) || is.null(input$triage_date_end)) return()
     start_date <- as.Date(input$triage_date_start)
     end_date   <- as.Date(input$triage_date_end)
-    if (is.na(start_date) || is.na(end_date) || start_date <= end_date) return()
+    if (any(is.na(c(start_date, end_date))) || isTRUE(start_date <= end_date)) return()
     updateDateInput(session, "triage_date_end", value = start_date)
   }, ignoreInit = TRUE)
 
@@ -5962,7 +6864,6 @@ server <- function(input, output, session) {
     )
   }, ignoreInit = TRUE)
   
-  # ---- measurements -----
   
   observeEvent(input$hc_mm_group_click, {
     req(authed(), session_role() == "institution", input$tabs == "Medidas Moove")
