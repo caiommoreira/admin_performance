@@ -5580,7 +5580,7 @@ server <- function(input, output, session) {
         tagList(
           if (i > 1) tags$hr(style = "margin:28px 0;"),
           tags$h3(paste0("Treinador: ", report$trainer_name)),
-          tags$p(tags$b("Usuarios: "), if (length(report$user_names)) paste(report$user_names, collapse = ", ") else "Nenhum usuario associado."),
+          tags$p(tags$b("Usuarios: "), format(length(report$user_names), big.mark = ".", decimal.mark = ",")),
           fluidRow(
             column(3, tags$p(tags$b("Numero de triagens realizadas: "), format(report$total_triages, big.mark = ".", decimal.mark = ","))),
             column(3, tags$p(tags$b("Media de triagens por dia: "), format(round(report$avg_triages_per_day, 2), nsmall = 2, decimal.mark = ","))),
@@ -5603,10 +5603,18 @@ server <- function(input, output, session) {
             column(4, plotOutput(paste0("triage_report_incorrect_", tid), height = "320px")),
             column(4, plotOutput(paste0("triage_report_rt_", tid), height = "320px"))
           ),
-          tags$h4("Triagens por mes", style = "margin-top:18px;"),
-          DTOutput(paste0("triage_report_monthly_", tid)),
-          tags$h4("Mapa de calor das triagens", style = "margin-top:18px;"),
-          plotOutput(paste0("triage_report_heat_", tid), height = "360px")
+          fluidRow(
+            column(
+              6,
+              tags$h4("Triagens por mes", style = "margin-top:18px;"),
+              DTOutput(paste0("triage_report_monthly_", tid))
+            ),
+            column(
+              6,
+              tags$h4("Mapa de calor das triagens", style = "margin-top:18px;"),
+              plotOutput(paste0("triage_report_heat_", tid), height = "360px")
+            )
+          )
         )
       })
     )
