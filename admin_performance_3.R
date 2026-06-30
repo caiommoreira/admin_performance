@@ -177,6 +177,7 @@ get_legal_entity_trainers_users <- function(sel_legal_entity_trainers) {
 
   cols <- tryCatch(colnames(user_related_users), error = function(e) character())
   target_col <- c(
+    "user_id_related",
     "related_user_id",
     "user_related_user_id",
     "target_user_id",
@@ -3249,7 +3250,7 @@ server <- function(input, output, session) {
         trainer_name = as.character(.data$trainer),
         unit = as.character(.data$unit)
       ) %>%
-      dplyr::distinct() %>%
+      dplyr::distinct(.data$trainer_id, .keep_all = TRUE) %>%
       dplyr::arrange(.data$trainer_name)
   })
 
@@ -3282,9 +3283,9 @@ server <- function(input, output, session) {
     req(authed(), session_role() == "institution", input$tabs == triage_report_tab_label())
     trainers <- triage_report_unit_trainers()
     links <- triage_report_trainer_links()
-    raw_df <- triage_report_raw_df()
+    inst_id <- selected_institution_id()
 
-    if (!nrow(trainers) || !nrow(links) || !nrow(raw_df)) {
+    if (!nrow(trainers) || !nrow(links)) {
       return(list())
     }
 
@@ -3314,8 +3315,19 @@ server <- function(input, output, session) {
         dplyr::left_join(user_names, by = "user_id") %>%
         dplyr::arrange(.data$display_name)
 
-      trainer_df <- raw_df %>%
-        dplyr::filter(.data$user_id %in% trainer_links$user_id) %>%
+      trainer_raw_df <- get_moove_scores_raw_data_cached(
+        unique(as.integer(trainer_links$user_id)),
+        inst_id,
+        as.character(trainer_id)
+      ) %>%
+        dplyr::mutate(
+          played_at = suppressWarnings(lubridate::ymd_hms(.data$date_time, tz = "UTC", quiet = TRUE)),
+          played_at = dplyr::coalesce(.data$played_at, suppressWarnings(as.POSIXct(.data$date_time, tz = "UTC"))),
+          date = dplyr::coalesce(as.Date(.data$played_at), as.Date(substr(as.character(.data$date_time), 1, 10))),
+          hour = substr(as.character(.data$date_time), 12, 13)
+        )
+
+      trainer_df <- trainer_raw_df %>%
         dplyr::left_join(trainer_users, by = "user_id") %>%
         dplyr::mutate(name = dplyr::coalesce(.data$display_name, paste0("user_", .data$user_id)))
 
@@ -3446,9 +3458,9 @@ server <- function(input, output, session) {
       )
 
       report_list[[i]] <- list(
-        trainer_id = trainer_id,
-        trainer_name = trainer_name,
-        user_names = trainer_users$display_name,
+          trainer_id = trainer_id,
+          trainer_name = trainer_name,
+          user_names = trainer_users$display_name,
         raw_df = trainer_df,
         quantiles = qs,
         daily_triages = daily_triages,
@@ -5582,10 +5594,10 @@ server <- function(input, output, session) {
           tags$h3(paste0("Treinador: ", report$trainer_name)),
           tags$p(tags$b("Usuarios: "), format(length(report$user_names), big.mark = ".", decimal.mark = ",")),
           fluidRow(
-            column(3, tags$p(tags$b("Numero de triagens realizadas: "), format(report$total_triages, big.mark = ".", decimal.mark = ","))),
-            column(3, tags$p(tags$b("Media de triagens por dia: "), format(round(report$avg_triages_per_day, 2), nsmall = 2, decimal.mark = ","))),
-            column(3, tags$p(tags$b("Numero de triagens que demandava ativacao: "), format(report$demand_n, big.mark = ".", decimal.mark = ","))),
-            column(3, tags$p(tags$b("Numero de ativacoes realizadas: "), format(report$activation_n, big.mark = ".", decimal.mark = ",")))
+            column(12, tags$p(tags$b("Numero de triagens realizadas: "), format(report$total_triages, big.mark = ".", decimal.mark = ","))),
+            column(12, tags$p(tags$b("Media de triagens por dia: "), format(round(report$avg_triages_per_day, 2), nsmall = 2, decimal.mark = ","))),
+            column(12, tags$p(tags$b("Numero de triagens que demandava ativacao: "), format(report$demand_n, big.mark = ".", decimal.mark = ","))),
+            column(12, tags$p(tags$b("Numero de ativacoes realizadas: "), format(report$activation_n, big.mark = ".", decimal.mark = ",")))
           ),
           fluidRow(
             column(4, tags$p(tags$b("Numero de triagens classificadas como ativacao amarela: "), format(report$triage_color_counts[["yellow"]], big.mark = ".", decimal.mark = ","))),
