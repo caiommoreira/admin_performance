@@ -1499,8 +1499,11 @@ build_triage_heatmap_plot <- function(df) {
 
   grid_df %>%
     dplyr::left_join(heat_df, by = c("weekday", "hour_num")) %>%
-    dplyr::mutate(n = dplyr::coalesce(.data$n, 0L)) %>%
-    ggplot2::ggplot(ggplot2::aes(x = .data$hour_num, y = .data$weekday, fill = .data$n)) +
+    dplyr::mutate(
+      n = dplyr::coalesce(.data$n, 0L),
+      tooltip = paste0("Hora: ", .data$hour_num, "h<br>Dia: ", .data$weekday, "<br>Triagens: ", .data$n)
+    ) %>%
+    ggplot2::ggplot(ggplot2::aes(x = .data$hour_num, y = .data$weekday, fill = .data$n, text = .data$tooltip)) +
     ggplot2::geom_tile(color = NA) +
     ggplot2::scale_x_continuous(breaks = 0:23) +
     ggplot2::scale_fill_gradient(low = "#440154", high = "#FDE725") +
@@ -2788,6 +2791,7 @@ server <- function(input, output, session) {
   triage_selected_unit <- reactiveVal(NA_character_)
   triage_selected_click_date <- reactiveVal(as.Date(NA))
   triage_refresh_tick <- reactiveVal(0L)
+  triage_report_selected_hour <- reactiveVal(NA_integer_)
   triage_manager_mode <- reactive({
     isTRUE(is_manager == 1) || identical(trimws(as.character(input$triage_manager_code %||% "")), "Senso298")
   })
@@ -3425,6 +3429,7 @@ server <- function(input, output, session) {
   })
 
   observeEvent(list(input$triage_report_unit, triage_report_month_choices()), {
+    triage_report_selected_hour(NA_integer_)
     choices <- triage_report_month_choices()
     selected_month <- input$triage_report_month
     if (is.null(selected_month) || !selected_month %in% unname(choices)) {
@@ -3459,6 +3464,7 @@ server <- function(input, output, session) {
       dplyr::arrange(.data$display_name)
 
     selected_month <- input$triage_report_month %||% "all"
+    selected_hour <- triage_report_selected_hour()
 
     raw_df <- get_moove_scores_raw_data_cached(
       user_ids,
@@ -3479,10 +3485,20 @@ server <- function(input, output, session) {
         dplyr::filter(.data$date >= month_start, .data$date <= month_end)
     }
 
+    heat_df <- raw_df
+
+    if (!is.na(selected_hour)) {
+      hour_min <- max(0L, as.integer(selected_hour) - 1L)
+      hour_max <- min(23L, as.integer(selected_hour) + 1L)
+      raw_df <- raw_df %>%
+        dplyr::mutate(hour_num = suppressWarnings(as.integer(.data$hour))) %>%
+        dplyr::filter(!is.na(.data$hour_num), .data$hour_num >= hour_min, .data$hour_num <= hour_max) %>%
+        dplyr::select(-.data$hour_num)
+    }
+
     unit_df <- raw_df %>%
       dplyr::left_join(unit_users, by = "user_id") %>%
       dplyr::mutate(name = dplyr::coalesce(.data$display_name, paste0("user_", .data$user_id)))
-
     activation_rows <- list()
     activation_idx <- 0L
 
@@ -3593,7 +3609,7 @@ server <- function(input, output, session) {
         performed_df = tibble::tibble(),
         monthly_df = tibble::tibble(),
         heat_df = tibble::tibble(),
-        total_triages = 0L,
+        selected_hour = NA_integer_,
         avg_triages_per_day = 0,
         demand_n = 0L,
         activation_n = 0L,
@@ -3646,7 +3662,8 @@ server <- function(input, output, session) {
       demand_df = demand_df,
       performed_df = performed_df,
       monthly_df = build_triage_monthly_table(unit_df, date_col = "date", count_name = "triagens"),
-      heat_df = unit_df,
+      heat_df = heat_df,
+      selected_hour = selected_hour,
       total_triages = nrow(unit_df),
       avg_triages_per_day = if (nrow(daily_counts)) mean(daily_counts$n) else 0,
       demand_n = nrow(demand_df),
@@ -5790,6 +5807,13 @@ server <- function(input, output, session) {
 
     tagList(
       tags$h2(format_triage_report_unit_title(input$triage_report_unit %||% ""), style = "text-align:center; font-weight:700;"),
+      if (!is.na(report$selected_hour)) {
+        div(
+          style = "display:flex; justify-content:center; align-items:center; gap:12px; margin-bottom:10px;",
+          tags$span(sprintf("Filtro de horario ativo: %02dh as %02dh", max(0, report$selected_hour - 1L), min(23, report$selected_hour + 1L))),
+          actionButton("triage_report_clear_hour", "Limpar filtro de horario", class = "btn btn-default btn-sm")
+        )
+      },
       tags$p(tags$b("Usuarios: "), format(length(report$user_names), big.mark = ".", decimal.mark = ",")),
       fluidRow(
         column(12, tags$p(tags$b("Numero de triagens realizadas: "), format(report$total_triages, big.mark = ".", decimal.mark = ","))),
@@ -5823,7 +5847,7 @@ server <- function(input, output, session) {
           column(
             6,
             tags$h4("Mapa de calor das triagens", style = "margin-top:18px;"),
-            plotOutput(paste0("triage_report_heat_", tid), height = "360px")
+            plotlyOutput(paste0("triage_report_heat_", tid), height = "360px")
           )
         )
       } else {
@@ -5831,7 +5855,7 @@ server <- function(input, output, session) {
           column(
             12,
             tags$h4("Mapa de calor das triagens", style = "margin-top:18px;"),
-            plotOutput(paste0("triage_report_heat_", tid), height = "360px")
+            plotlyOutput(paste0("triage_report_heat_", tid), height = "360px")
           )
         )
       }
@@ -5893,10 +5917,13 @@ server <- function(input, output, session) {
       )
     })
 
-    output[[paste0("triage_report_heat_", tid)]] <- renderPlot({
-      print(build_triage_heatmap_plot(report$heat_df))
+    output[[paste0("triage_report_heat_", tid)]] <- plotly::renderPlotly({
+      plotly::ggplotly(build_triage_heatmap_plot(report$heat_df), tooltip = "text", source = "triage_report_heat") %>%
+        plotly::event_register("plotly_click") %>%
+        plotly::layout(dragmode = "pan")
     })
   })
+
 
 
   output$download_triage_xlsx <- downloadHandler(
@@ -7100,6 +7127,26 @@ server <- function(input, output, session) {
       )
     )
   }, ignoreInit = TRUE)
+
+  observeEvent(input$triage_report_clear_hour, {
+    triage_report_selected_hour(NA_integer_)
+  }, ignoreInit = TRUE)
+
+  observeEvent(plotly::event_data("plotly_click", source = "triage_report_heat"), {
+    req(authed(), session_role() == "institution", input$tabs == triage_report_tab_label())
+    ev <- plotly::event_data("plotly_click", source = "triage_report_heat")
+    req(!is.null(ev), nrow(ev) > 0)
+
+    raw_x <- ev$x[[1]]
+    clicked_hour <- suppressWarnings(as.integer(round(as.numeric(raw_x))))
+    if (is.na(clicked_hour)) {
+      clicked_hour <- suppressWarnings(as.integer(raw_x))
+    }
+    req(!is.na(clicked_hour), clicked_hour >= 0, clicked_hour <= 23)
+
+    triage_report_selected_hour(clicked_hour)
+  }, ignoreInit = TRUE)
+
   
   
   observeEvent(input$hc_mm_group_click, {
