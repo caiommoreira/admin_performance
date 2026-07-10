@@ -543,8 +543,22 @@ triage_tab_panel <- function() {
   tabPanel(
     triage_tab_label(),
     br(),
-    fluidRow(
-      column(9),
+    br(),
+    fluidRow(align = "center",
+      column(3),
+      column(
+        6,align = "center",
+        div(
+          style = "display:flex; justify-content:center;",
+          radioButtons(
+            "triage_bucket_mode",
+            label = NULL,
+            choices = c("Grupos/Treinadores" = "grouping", "Unidades" = "units"),
+            selected = "grouping",
+            inline = TRUE
+          )
+        )
+      ),
       column(
         3,
         div(
@@ -552,7 +566,7 @@ triage_tab_panel <- function() {
           textInput("triage_manager_code", label = NULL, value = "", width = "120px")
         )
       )
-    ),
+    ),br(),
     tags$h4("Triagens", style = "text-align:center; font-weight:700;"),
     fluidRow(align = "center", DTOutput("tbl_triage_monthly", width = "33%")),
     br(),
@@ -575,9 +589,9 @@ triage_report_tab_panel <- function() {
   tabPanel(
     triage_report_tab_label(),
     br(),
-    fluidRow(
+    fluidRow(align = "center",
       column(4),
-      column(4, selectInput("triage_report_unit", "Unit", choices = character(0))),
+      column(4,align = "center", selectInput("triage_report_unit", "Unidade", choices = character(0))),
       column(4)
     ),
     br(),
@@ -2750,9 +2764,15 @@ server <- function(input, output, session) {
       )
   })
 
+  triage_bucket_mode <- reactive({
+    mode <- input$triage_bucket_mode %||% "grouping"
+    if (identical(mode, "units")) "units" else "grouping"
+  })
+
   triage_view_mode <- reactiveVal("groups")
 
   triage_selected_group <- reactiveVal(NA_integer_)
+  triage_selected_unit <- reactiveVal(NA_character_)
   triage_selected_click_date <- reactiveVal(as.Date(NA))
   triage_refresh_tick <- reactiveVal(0L)
   triage_manager_mode <- reactive({
@@ -2761,6 +2781,43 @@ server <- function(input, output, session) {
 
   triage_page <- reactiveVal(1L)
 
+  triage_units_sheet_df <- reactive({
+    req(authed(), session_role() == "institution", input$tabs == triage_tab_label())
+    triage_refresh_tick()
+    read_triage_threshold_sheet(TRIAGE_SHEET_ID, grouping_mode = "trainers")
+  })
+
+  triage_unit_trainers <- reactive({
+    triage_units_sheet_df() %>%
+      dplyr::filter(!is.na(.data$unit), nzchar(trimws(.data$unit))) %>%
+      dplyr::filter(!is.na(.data$trainer_id), !is.na(.data$trainer), nzchar(trimws(.data$trainer))) %>%
+      dplyr::transmute(
+        trainer_id = as.integer(.data$trainer_id),
+        trainer_name = as.character(.data$trainer),
+        unit = as.character(.data$unit)
+      ) %>%
+      dplyr::distinct(.data$trainer_id, .keep_all = TRUE) %>%
+      dplyr::arrange(.data$unit, .data$trainer_name)
+  })
+
+  triage_unit_user_links <- reactive({
+    trainers <- triage_unit_trainers()
+
+    if (!nrow(trainers)) {
+      return(tibble::tibble(user_id = integer(), group_name = character(), unit = character()))
+    }
+
+    get_legal_entity_trainers_users(trainers$trainer_id) %>%
+      dplyr::inner_join(trainers, by = "trainer_id") %>%
+      dplyr::transmute(
+        user_id = as.integer(.data$user_id),
+        group_name = as.character(.data$unit),
+        unit = as.character(.data$unit)
+      ) %>%
+      dplyr::filter(!is.na(.data$group_name), .data$group_name != "") %>%
+      dplyr::distinct()
+  })
+
   triage_sheet_df <- reactive({
     req(authed(), session_role() == "institution", input$tabs == triage_tab_label())
     triage_refresh_tick()
@@ -2768,6 +2825,10 @@ server <- function(input, output, session) {
   })
 
   triage_sheet_group_thresholds <- reactive({
+    if (identical(triage_bucket_mode(), "units")) {
+      return(triage_threshold_defaults())
+    }
+
     gid <- triage_selected_group()
     if (is.na(gid)) return(triage_threshold_defaults())
 
@@ -2783,7 +2844,7 @@ server <- function(input, output, session) {
   triage_group_thresholds <- reactive({
     sheet_vals <- triage_sheet_group_thresholds()
 
-    if (!isTRUE(triage_manager_mode())) {
+    if (!isTRUE(triage_manager_mode()) || identical(triage_bucket_mode(), "units")) {
       return(sheet_vals)
     }
 
@@ -2826,9 +2887,20 @@ server <- function(input, output, session) {
     d <- triage_raw_df()
     req(nrow(d) > 0)
 
-        ug_named <- grouping_user_links() %>%
-      dplyr::filter(.data$user_id %in% !!unique(as.integer(d$user_id))) %>%
-      dplyr::distinct(.data$user_id, .data$group_id, .keep_all = TRUE)
+    ug_named <- if (identical(triage_bucket_mode(), "units")) {
+      triage_unit_user_links() %>%
+        dplyr::filter(.data$user_id %in% !!unique(as.integer(d$user_id))) %>%
+        dplyr::transmute(
+          user_id = as.integer(.data$user_id),
+          group_id = as.integer(as.factor(.data$group_name)),
+          group_name = as.character(.data$group_name)
+        ) %>%
+        dplyr::distinct(.data$user_id, .data$group_name, .keep_all = TRUE)
+    } else {
+      grouping_user_links() %>%
+        dplyr::filter(.data$user_id %in% !!unique(as.integer(d$user_id))) %>%
+        dplyr::distinct(.data$user_id, .data$group_id, .keep_all = TRUE)
+    }
 
     if (!nrow(ug_named)) {
       return(tibble::tibble(group_id = integer(), group_name = character(), n = integer()))
@@ -2842,6 +2914,18 @@ server <- function(input, output, session) {
   })
 
   triage_selected_group_users <- reactive({
+    if (identical(triage_bucket_mode(), "units")) {
+      unit_name <- triage_selected_unit()
+      req(!is.null(unit_name), !is.na(unit_name), nzchar(unit_name))
+
+      return(
+        triage_unit_user_links() %>%
+          dplyr::filter(.data$unit == unit_name) %>%
+          dplyr::transmute(user_id = as.integer(.data$user_id)) %>%
+          dplyr::distinct()
+      )
+    }
+
     gid <- triage_selected_group()
     req(!is.na(gid))
 
@@ -2852,6 +2936,12 @@ server <- function(input, output, session) {
   })
 
   triage_selected_group_name <- reactive({
+    if (identical(triage_bucket_mode(), "units")) {
+      unit_name <- triage_selected_unit()
+      req(!is.null(unit_name), !is.na(unit_name), nzchar(unit_name))
+      return(as.character(unit_name))
+    }
+
     gid <- triage_selected_group()
     req(!is.na(gid))
 
@@ -2861,8 +2951,13 @@ server <- function(input, output, session) {
 
   triage_selected_group_df <- reactive({
     req(authed(), session_role() == "institution", input$tabs == triage_tab_label())
-    gid <- triage_selected_group()
-    req(!is.na(gid))
+    if (identical(triage_bucket_mode(), "units")) {
+      unit_name <- triage_selected_unit()
+      req(!is.null(unit_name), !is.na(unit_name), nzchar(unit_name))
+    } else {
+      gid <- triage_selected_group()
+      req(!is.na(gid))
+    }
 
     d <- triage_raw_df()
     ug_users <- triage_selected_group_users()
@@ -2952,6 +3047,26 @@ server <- function(input, output, session) {
 
     d <- d %>%
       dplyr::filter(.data$date >= start_date, .data$date <= end_date)
+
+    filter_mode <- input$triage_user_filter %||% "period"
+    if (!identical(filter_mode, "period")) {
+      lookback_hours <- dplyr::case_when(
+        filter_mode == "24h" ~ 24,
+        filter_mode == "12h" ~ 12,
+        filter_mode == "3h"  ~ 3,
+        TRUE ~ NA_real_
+      )
+
+      if (is.finite(lookback_hours)) {
+        cutoff_ts <- Sys.time() - lubridate::hours(lookback_hours)
+        eligible_users <- d %>%
+          dplyr::filter(!is.na(.data$played_at), .data$played_at >= cutoff_ts) %>%
+          dplyr::distinct(.data$user_id) %>%
+          dplyr::pull(.data$user_id)
+
+        d <- d %>% dplyr::filter(.data$user_id %in% eligible_users)
+      }
+    }
 
     if (!nrow(d)) {
       return(tibble::tibble(
@@ -5202,7 +5317,7 @@ server <- function(input, output, session) {
 
     highchart() %>%
       hc_chart(type = "column", inverted = TRUE) %>%
-      hc_title(text = "Triagens por grupo") %>%
+      hc_title(text = if (identical(triage_bucket_mode(), "units")) "Triagens por unidade" else paste0("Triagens por ", grouping_label(grouping_mode(), plural = FALSE, title_case = FALSE))) %>%
       hc_xAxis(categories = df$group_name) %>%
       hc_yAxis(
         title = list(text = "Quantidade de triagens"),
@@ -5247,7 +5362,8 @@ server <- function(input, output, session) {
 
   output$ui_triage_back <- renderUI({
     if (identical(triage_view_mode(), "group")) {
-      actionButton("btn_triage_back", "Voltar aos grupos", icon = icon("arrow-left"), class = "btn btn-light")
+      lbl <- if (identical(triage_bucket_mode(), "units")) "Voltar às unidades" else paste0("Voltar aos ", grouping_label(grouping_mode(), plural = TRUE, title_case = FALSE))
+      actionButton("btn_triage_back", lbl, icon = icon("arrow-left"), class = "btn btn-light")
     } else {
       NULL
     }
@@ -5260,7 +5376,7 @@ server <- function(input, output, session) {
       return(
         div(
           style = "padding:12px; border:1px solid #eee; border-radius:8px; background:#fafafa;",
-          "Selecione um grupo no gráfico para ver as distribuições e o painel de triagens."
+          paste0("Selecione ", if (identical(triage_bucket_mode(), "units")) "uma " else "um ", if (identical(triage_bucket_mode(), "units")) "unidade" else grouping_label(grouping_mode(), plural = FALSE, title_case = FALSE), " no gráfico para ver as distribuições e o painel de triagens.")
         )
       )
     }
@@ -5269,7 +5385,7 @@ server <- function(input, output, session) {
 
     tagList(
       hr(),
-      if (isTRUE(triage_manager_mode())) {
+      if (isTRUE(triage_manager_mode()) && !identical(triage_bucket_mode(), "units")) {
         tagList(
           fluidRow(align = "center",
             column(
@@ -5314,6 +5430,26 @@ server <- function(input, output, session) {
                     actionButton("triage_refresh", "Atualizar dados", icon = icon("rotate-right"), class = "btn btn-default")
                   )
                 )
+      ),
+      fluidRow(
+        column(
+          12,
+          div(
+            style = "display:flex; justify-content:center;",
+            radioButtons(
+              "triage_user_filter",
+              label = "Filtrar usuários que realizaram a triagem:",
+              choices = c(
+                "No período selecionado" = "period",
+                "Últimas 24 horas" = "24h",
+                "Últimas 12 horas" = "12h",
+                "Últimas 3 horas" = "3h"
+              ),
+              selected = "period",
+              inline = TRUE
+            )
+          )
+        )
       ),
       fluidRow(
         column(12, uiOutput("ui_triage_panel_plot"))
@@ -5458,11 +5594,15 @@ server <- function(input, output, session) {
   output$plt_triage_panel <- renderPlotly({
     req(authed(), session_role() == "institution", input$tabs == triage_tab_label())
     df <- triage_panel_df()
+    bucket_label <- if (identical(triage_bucket_mode(), "units")) {
+      "unidade"
+    } else {
+      grouping_label(grouping_mode(), plural = FALSE, title_case = FALSE)
+    }
     req(nrow(df) > 0)
     group_name <- triage_selected_group_name()
     req(nzchar(group_name))
 
-    bucket_label <- grouping_label(grouping_mode(), plural = FALSE, title_case = FALSE)
     ring_df <- triage_training_rings_df()
 
     if (nrow(ring_df)) {
@@ -5534,7 +5674,7 @@ server <- function(input, output, session) {
         labels = function(x) format(x, "%d/%m/%Y")
       ) +
       ggplot2::labs(
-        title = paste0("Painel de triagens do ", bucket_label, " ", group_name),
+        title = paste0("Painel de triagens do(a) ", bucket_label, " ", group_name),
         x = NULL,
         y = NULL
       ) +
@@ -6750,17 +6890,28 @@ server <- function(input, output, session) {
   # ---- triage and activation ----
   observeEvent(input$hc_triage_group_click, {
     clicked_name <- input$hc_triage_group_click$name
-    gdf <- grouping_entities()
-    gid <- gdf$id[match(clicked_name, gdf$name)]
-    if (!is.na(gid)) {
-      triage_selected_group(as.integer(gid))
-      triage_view_mode("group")
-      triage_page(1L)
+    if (identical(triage_bucket_mode(), "units")) {
+      if (!is.null(clicked_name) && nzchar(as.character(clicked_name))) {
+        triage_selected_unit(as.character(clicked_name))
+        triage_selected_group(NA_integer_)
+        triage_view_mode("group")
+        triage_page(1L)
+      }
+    } else {
+      gdf <- grouping_entities()
+      gid <- gdf$id[match(clicked_name, gdf$name)]
+      if (!is.na(gid)) {
+        triage_selected_group(as.integer(gid))
+        triage_selected_unit(NA_character_)
+        triage_view_mode("group")
+        triage_page(1L)
+      }
     }
   })
 
   observeEvent(input$btn_triage_back, {
     triage_selected_group(NA_integer_)
+    triage_selected_unit(NA_character_)
     triage_view_mode("groups")
     triage_page(1L)
   })
@@ -6786,8 +6937,9 @@ server <- function(input, output, session) {
     updateDateInput(session, "triage_date_end", value = rng$end, min = min(d$date, na.rm = TRUE), max = max(d$date, na.rm = TRUE))
   }, ignoreInit = TRUE)
 
-  observeEvent(list(triage_selected_group(), triage_sheet_df(), triage_view_mode(), triage_manager_mode()), {
+  observeEvent(list(triage_selected_group(), triage_sheet_df(), triage_view_mode(), triage_manager_mode(), triage_bucket_mode()), {
     req(identical(triage_view_mode(), "group"))
+    req(!identical(triage_bucket_mode(), "units"))
     req(isTRUE(triage_manager_mode()))
     vals <- triage_sheet_group_thresholds()
 
@@ -6816,6 +6968,7 @@ server <- function(input, output, session) {
 
   observeEvent(input$triage_save_thresholds, {
     req(authed(), session_role() == "institution", isTRUE(triage_manager_mode()))
+    req(!identical(triage_bucket_mode(), "units"))
     gid <- triage_selected_group()
     req(!is.na(gid))
 
@@ -6958,3 +7111,8 @@ server <- function(input, output, session) {
 }
 
 shinyApp(ui, server)
+
+
+
+
+
