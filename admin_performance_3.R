@@ -3289,16 +3289,8 @@ server <- function(input, output, session) {
       return(list())
     }
 
-    user_ids <- unique(as.integer(links$user_id))
-    name_df <- get_names_for_users(user_ids)
-    nick_df <- get_nickname_for_users(user_ids)
-    trainer_tags_df <- read_trainer_tags_sheet(TRIAGE_SHEET_ID)
 
-    user_names <- tibble::tibble(user_id = user_ids) %>%
-      dplyr::left_join(name_df, by = "user_id") %>%
-      dplyr::left_join(nick_df, by = "user_id") %>%
-      dplyr::mutate(display_name = dplyr::coalesce(.data$nickname, .data$name, paste0("user_", .data$user_id))) %>%
-      dplyr::select("user_id", "display_name")
+    trainer_tags_df <- read_trainer_tags_sheet(TRIAGE_SHEET_ID)
 
     report_list <- vector("list", nrow(trainers))
 
@@ -3311,12 +3303,20 @@ server <- function(input, output, session) {
         dplyr::filter(.data$trainer_id == trainer_id) %>%
         dplyr::distinct(.data$user_id)
 
-      trainer_users <- trainer_links %>%
-        dplyr::left_join(user_names, by = "user_id") %>%
+      trainer_user_ids <- unique(as.integer(trainer_links$user_id))
+      trainer_user_ids <- trainer_user_ids[!is.na(trainer_user_ids)]
+
+      trainer_name_df <- get_names_for_users(trainer_user_ids)
+      trainer_nick_df <- get_nickname_for_users(trainer_user_ids)
+
+      trainer_users <- tibble::tibble(user_id = trainer_user_ids) %>%
+        dplyr::left_join(trainer_name_df, by = "user_id") %>%
+        dplyr::left_join(trainer_nick_df, by = "user_id") %>%
+        dplyr::mutate(display_name = dplyr::coalesce(.data$nickname, .data$name, paste0("user_", .data$user_id))) %>%
         dplyr::arrange(.data$display_name)
 
       trainer_raw_df <- get_moove_scores_raw_data_cached(
-        unique(as.integer(trainer_links$user_id)),
+        trainer_user_ids,
         inst_id,
         as.character(trainer_id)
       ) %>%
@@ -3403,7 +3403,7 @@ server <- function(input, output, session) {
 
             completions <- training_tag_completions_tbl %>%
               dplyr::filter(
-                .data$user_id %in% !!unique(as.integer(trainer_links$user_id)),
+                .data$user_id %in% !!trainer_user_ids,
                 .data$training_id %in% !!as.integer(training_ids)
               ) %>%
               dplyr::transmute(
