@@ -6703,6 +6703,8 @@ server <- function(input, output, session) {
       pass  <- "sesivolei1"
       email <- "luana@cityvida.com.br"
       pass  <- "CityVida07"
+      email <- "sensorial.botafogo@safbfr.com.br"
+      pass  <- "8hGyx5"
       # email <- "deise.superaonline@franquiasupera.com.br"
       # pass  <- "Cc8888"
     }else{
@@ -6755,7 +6757,10 @@ server <- function(input, output, session) {
 
   observe({
     req(authed(), session_role() == "institution")
-    can_see_triage <- identical(tolower(authed_email() %||% ""), "luana@cityvida.com.br")
+    can_see_triage <- tolower(authed_email() %||% "") %in% c(
+      "luana@cityvida.com.br",
+      "sensorial.botafogo@safbfr.com.br"
+    )
 
     if (can_see_triage && !isTRUE(triage_tab_visible())) {
       insertTab(
