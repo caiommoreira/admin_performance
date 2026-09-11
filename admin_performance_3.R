@@ -604,6 +604,165 @@ triage_report_tab_panel <- function() {
   )
 }
 
+today_tab_label <- function() {
+  "Today"
+}
+
+today_tab_panel <- function() {
+  tabPanel(
+    today_tab_label(),
+    br(),
+    fluidRow(
+      align = "center",
+      column(
+        12,
+        div(
+          style = "display:flex; justify-content:center; margin: 8px 0 16px 0;",
+          radioButtons(
+            "today_collection_mode",
+            label = "Base do Today:",
+            choices = c("Completo" = "full", "Light" = "light"),
+            selected = "full",
+            inline = TRUE
+          )
+        )
+      )
+    ),
+    fluidRow(
+      align = "center",
+      column(4),
+      column(4, uiOutput("ui_today_group")),
+      column(4)
+    ),
+    fluidRow(
+      align = "center",
+      column(3),
+      column(2, uiOutput("ui_today_date_start")),
+      column(2, uiOutput("ui_today_date_end")),
+      column(2, div(style = "margin-top:25px;", actionButton("today_refresh_data", "Atualizar dados"))),
+      column(3)
+    ),
+    br(),
+    fluidRow(align = "center", uiOutput("ui_today_status")),
+    fluidRow(align = "center", uiOutput("ui_today_download_data")),
+    br(),
+    uiOutput("ui_today_all_users_board"),
+    br(),
+    uiOutput("ui_today_user_detail")
+  )
+}
+
+today_empty_df <- function() {
+  tibble::tibble(
+    user_id = integer(), user_name = character(), hour = numeric(), hour_complete = character(),
+    created_at = character(), date = as.Date(character()), session = integer(), conclusion = numeric(),
+    velocity = numeric(), impulsiveness = numeric(), inattention = numeric(), happy = numeric(),
+    tired_out = numeric(), night_of_sleep = numeric(), tense = numeric(), c.velocity = character(),
+    c.impulsiveness = character(), c.inattention = character(), board_color = character(), fill_color = character()
+  )
+}
+
+today_color_bucket <- function(value, session, conclusion) {
+  dplyr::case_when(
+    conclusion == 0 ~ NA_character_,
+    session < 8 ~ "gray",
+    value < -1.75 ~ "red",
+    value < -1 ~ "yellow",
+    value < 1 ~ "white",
+    TRUE ~ "green"
+  )
+}
+
+prepare_today_summaries <- function(today_summaries, users_df) {
+  if (is.null(today_summaries) || !is.data.frame(today_summaries) || !nrow(today_summaries)) {
+    return(today_empty_df())
+  }
+
+  df <- tibble::as_tibble(today_summaries)
+  if (!"created_at" %in% names(df)) df$created_at <- NA_character_
+  if ("date_time_start" %in% names(df)) {
+    df$created_at[is.na(df$created_at)] <- df$date_time_start[is.na(df$created_at)]
+  }
+
+  df <- df %>%
+    dplyr::mutate(
+      user_id = as.integer(.data$user_id),
+      created_at = as.character(.data$created_at)
+    ) %>%
+    dplyr::filter(!is.na(.data$user_id), !is.na(.data$created_at), nzchar(.data$created_at))
+
+  if (!nrow(df)) return(today_empty_df())
+
+  conclusion <- rep(NA_real_, nrow(df))
+  responses <- tibble::tibble()
+  if ("parameters" %in% names(df) && is.data.frame(df$parameters)) {
+    params <- tibble::as_tibble(df$parameters)
+    if ("conclusion" %in% names(params)) conclusion <- suppressWarnings(as.numeric(params$conclusion))
+    if ("responses" %in% names(params) && is.data.frame(params$responses)) {
+      responses <- tibble::as_tibble(params$responses)
+    }
+  }
+
+  stamps <- tibble::tibble()
+  if ("stamps" %in% names(df) && is.data.frame(df$stamps)) {
+    stamps <- tibble::as_tibble(df$stamps)
+  }
+
+  base <- dplyr::bind_cols(
+    df %>%
+      dplyr::transmute(
+        user_id = as.integer(.data$user_id),
+        created_at = as.character(.data$created_at),
+        date = as.Date(substr(.data$created_at, 1, 10)),
+        hour_complete = substr(.data$created_at, 12, 19),
+        hour = suppressWarnings(as.numeric(substr(.data$created_at, 12, 13)))
+      ),
+    stamps,
+    tibble::tibble(conclusion = conclusion),
+    responses
+  )
+
+  if ("values" %in% names(base) && is.list(base$values)) {
+    old_metric_cols <- intersect(c("inattention", "efficiency", "impulsiveness", "velocity"), names(base))
+    base <- base %>%
+      dplyr::select(-dplyr::all_of(old_metric_cols)) %>%
+      tidyr::unnest_wider(col = "values")
+  }
+
+  for (nm in c("velocity", "impulsiveness", "inattention", "happy", "tired_out", "night_of_sleep", "tense")) {
+    if (!nm %in% names(base)) base[[nm]] <- NA_real_
+  }
+
+  base %>%
+    dplyr::left_join(users_df, by = "user_id") %>%
+    dplyr::mutate(
+      user_name = dplyr::coalesce(.data$user_name, paste0("user_", .data$user_id)),
+      dplyr::across(c("velocity", "impulsiveness", "inattention", "happy", "tired_out", "night_of_sleep", "tense"), as.numeric),
+      dplyr::across(c("happy", "tired_out", "night_of_sleep", "tense"), ~ tidyr::replace_na(.x, 0.49)),
+      conclusion = tidyr::replace_na(as.numeric(.data$conclusion), 0)
+    ) %>%
+    dplyr::arrange(.data$user_id, .data$created_at) %>%
+    dplyr::group_by(.data$user_id) %>%
+    dplyr::mutate(session = dplyr::row_number()) %>%
+    dplyr::ungroup() %>%
+    dplyr::mutate(
+      velocity = dplyr::if_else(.data$session < 8, 0, .data$velocity),
+      impulsiveness = dplyr::if_else(.data$session < 8, 0, .data$impulsiveness),
+      inattention = dplyr::if_else(.data$session < 8, 0, .data$inattention),
+      c.velocity = today_color_bucket(.data$velocity, .data$session, .data$conclusion),
+      c.impulsiveness = today_color_bucket(.data$impulsiveness, .data$session, .data$conclusion),
+      c.inattention = today_color_bucket(.data$inattention, .data$session, .data$conclusion),
+      board_color = dplyr::case_when(
+        dplyr::if_any(c("c.velocity", "c.impulsiveness", "c.inattention"), is.na) ~ NA_character_,
+        dplyr::if_any(c("c.velocity", "c.impulsiveness", "c.inattention"), ~ .x == "gray") ~ "gray",
+        dplyr::if_any(c("c.velocity", "c.impulsiveness", "c.inattention"), ~ .x == "red") ~ "red",
+        dplyr::if_any(c("c.velocity", "c.impulsiveness", "c.inattention"), ~ .x == "yellow") ~ "yellow",
+        dplyr::if_any(c("c.velocity", "c.impulsiveness", "c.inattention"), ~ .x == "green") ~ "green",
+        TRUE ~ "white"
+      ),
+      fill_color = dplyr::if_else(is.na(.data$board_color), NA_character_, .data$board_color)
+    )
+}
 emoji_img <- function(filename, size = 18) {
   # filename ex.: "feliz.png" ou "feliz.svg"
   sprintf(
@@ -1005,6 +1164,12 @@ triage_threshold_defaults <- function() {
   )
 }
 
+normalize_institution_email <- function(x) {
+  out <- tolower(trimws(as.character(x)))
+  out[is.na(out) | out %in% c("na", "null")] <- ""
+  out
+}
+
 find_triage_threshold_sheet_name <- function(sheet_id) {
   if (!isTRUE(gs4_auth_ok)) return(NA_character_)
 
@@ -1042,7 +1207,7 @@ find_triage_threshold_sheet_name <- function(sheet_id) {
   sheet_names[[1]]
 }
 
-read_triage_threshold_sheet <- function(sheet_id, grouping_mode = "groups") {
+read_triage_threshold_sheet <- function(sheet_id, grouping_mode = "groups", institution_email = NA_character_) {
   if (!isTRUE(gs4_auth_ok)) return(tibble::tibble())
 
   target_sheet <- SCREENING_THRESHOLDS_SHEET
@@ -1066,6 +1231,7 @@ read_triage_threshold_sheet <- function(sheet_id, grouping_mode = "groups") {
   if (!"trainer" %in% names(out_tbl)) out_tbl$trainer <- NA_character_
   if (!"trainer_id" %in% names(out_tbl)) out_tbl$trainer_id <- NA_integer_
   if (!"unit" %in% names(out_tbl)) out_tbl$unit <- NA_character_
+  if (!"institution" %in% names(out_tbl)) out_tbl$institution <- NA_character_
 
   out_tbl <- out_tbl %>%
     dplyr::mutate(
@@ -1074,8 +1240,18 @@ read_triage_threshold_sheet <- function(sheet_id, grouping_mode = "groups") {
       group      = as.character(.data$group),
       group_id   = suppressWarnings(as.integer(.data$group_id)),
       trainer    = as.character(.data$trainer),
-      trainer_id = suppressWarnings(as.integer(.data$trainer_id))
+      trainer_id = suppressWarnings(as.integer(.data$trainer_id)),
+      institution = normalize_institution_email(.data$institution)
     )
+
+  institution_email <- normalize_institution_email(institution_email)
+  institution_email <- if (length(institution_email)) institution_email[[1]] else ""
+  has_institution_values <- any(nzchar(out_tbl$institution))
+
+  if (nzchar(institution_email) && has_institution_values) {
+    out_tbl <- out_tbl %>%
+      dplyr::filter(.data$institution == institution_email)
+  }
 
   if (identical(grouping_mode, "trainers")) {
     out_tbl <- out_tbl %>%
@@ -1205,7 +1381,7 @@ resolve_triage_thresholds_for_group <- function(sheet_df, group_id = NA_integer_
   out
 }
 
-save_triage_thresholds_for_group <- function(sheet_id, sheet_df, group_id, group_name, values_named, grouping_mode = "groups") {
+save_triage_thresholds_for_group <- function(sheet_id, sheet_df, group_id, group_name, values_named, grouping_mode = "groups", institution_email = NA_character_) {
   if (!isTRUE(gs4_auth_ok)) return(FALSE)
 
   target_sheet <- SCREENING_THRESHOLDS_SHEET
@@ -1230,7 +1406,8 @@ save_triage_thresholds_for_group <- function(sheet_id, sheet_df, group_id, group
       group = character(),
       group_id = integer(),
       trainer = character(),
-      trainer_id = integer()
+      trainer_id = integer(),
+      institution = character()
     )
   }
 
@@ -1240,6 +1417,7 @@ save_triage_thresholds_for_group <- function(sheet_id, sheet_df, group_id, group
   if (!"group_id" %in% names(base_df)) base_df$group_id <- NA_integer_
   if (!"trainer" %in% names(base_df)) base_df$trainer <- NA_character_
   if (!"trainer_id" %in% names(base_df)) base_df$trainer_id <- NA_integer_
+  if (!"institution" %in% names(base_df)) base_df$institution <- NA_character_
 
   base_df <- base_df %>%
     dplyr::mutate(
@@ -1248,7 +1426,8 @@ save_triage_thresholds_for_group <- function(sheet_id, sheet_df, group_id, group
       group = as.character(.data$group),
       group_id = suppressWarnings(as.integer(.data$group_id)),
       trainer = as.character(.data$trainer),
-      trainer_id = suppressWarnings(as.integer(.data$trainer_id))
+      trainer_id = suppressWarnings(as.integer(.data$trainer_id)),
+      institution = normalize_institution_email(.data$institution)
     )
 
   out <- base_df
@@ -1256,20 +1435,46 @@ save_triage_thresholds_for_group <- function(sheet_id, sheet_df, group_id, group
   gname <- as.character(group_name %||% "")
   name_col <- if (identical(grouping_mode, "trainers")) "trainer" else "group"
   id_col <- if (identical(grouping_mode, "trainers")) "trainer_id" else "group_id"
+  institution_email <- normalize_institution_email(institution_email)
+  institution_email <- if (length(institution_email)) institution_email[[1]] else ""
 
   for (ms in matched) {
+    measure_idx <- !is.na(out$measure) & out$measure == ms
+    institution_idx <- if (nzchar(institution_email)) {
+      out$institution == institution_email
+    } else {
+      rep(TRUE, nrow(out))
+    }
+
     hit_idx <- which(
       !is.na(out[[id_col]]) &
         out[[id_col]] == gid &
-        !is.na(out$measure) &
-        out$measure == ms
+        measure_idx &
+        institution_idx
     )
+
+    if (!length(hit_idx) && nzchar(institution_email)) {
+      hit_idx <- which(
+        !is.na(out[[id_col]]) &
+          out[[id_col]] == gid &
+          measure_idx &
+          !nzchar(out$institution)
+      )
+    }
 
     if (!length(hit_idx) && nzchar(gname)) {
       hit_idx <- which(
         tolower(dplyr::coalesce(out[[name_col]], "")) == tolower(gname) &
-          !is.na(out$measure) &
-          out$measure == ms
+          measure_idx &
+          institution_idx
+      )
+    }
+
+    if (!length(hit_idx) && nzchar(gname) && nzchar(institution_email)) {
+      hit_idx <- which(
+        tolower(dplyr::coalesce(out[[name_col]], "")) == tolower(gname) &
+          measure_idx &
+          !nzchar(out$institution)
       )
     }
 
@@ -1278,6 +1483,7 @@ save_triage_thresholds_for_group <- function(sheet_id, sheet_df, group_id, group
       out$value[row_i] <- as.numeric(values_named[[ms]])
       out[[name_col]][row_i] <- gname
       out[[id_col]][row_i] <- gid
+      out$institution[row_i] <- institution_email
     } else {
       new_row <- as.list(rep(NA, ncol(out)))
       names(new_row) <- names(out)
@@ -1285,6 +1491,7 @@ save_triage_thresholds_for_group <- function(sheet_id, sheet_df, group_id, group
       new_row$value <- as.numeric(values_named[[ms]])
       new_row[[name_col]] <- gname
       new_row[[id_col]] <- gid
+      new_row$institution <- institution_email
       out <- dplyr::bind_rows(out, tibble::as_tibble(new_row))
     }
   }
@@ -2011,6 +2218,10 @@ server <- function(input, output, session) {
   authed_email    <- reactiveVal(NA_character_)
   triage_tab_visible <- reactiveVal(TRUE)
   triage_report_tab_visible <- reactiveVal(FALSE)
+  today_tab_visible <- reactiveVal(FALSE)
+  today_refresh_tick <- reactiveVal(0L)
+  today_selected_user_id <- reactiveVal(NA_integer_)
+  today_board_height <- reactiveVal(600)
   
   # ---- institution and groups -----
   
@@ -2767,9 +2978,11 @@ server <- function(input, output, session) {
   triage_raw_df <- reactive({
     req(authed(), session_role() == "institution", input$tabs == triage_tab_label())
     triage_refresh_tick()
-    uids    <- scope_user_ids()
+    uids <- triage_allowed_user_ids()
+    if (!length(uids)) return(tibble::tibble())
+
     inst_id <- selected_institution_id()
-    choice  <- input$sel_group %||% "ALL"
+    choice <- paste0("triage:", grouping_mode(), ":", triage_institution_email())
 
     get_moove_scores_raw_data_cached(uids, inst_id, choice) %>%
       dplyr::mutate(
@@ -2798,10 +3011,20 @@ server <- function(input, output, session) {
 
   triage_page <- reactiveVal(1L)
 
+  triage_institution_email <- reactive({
+    req(authed(), session_role() == "institution")
+    out <- normalize_institution_email(authed_email() %||% "")
+    if (length(out)) out[[1]] else ""
+  })
+
   triage_units_sheet_df <- reactive({
     req(authed(), session_role() == "institution", input$tabs == triage_tab_label())
     triage_refresh_tick()
-    read_triage_threshold_sheet(TRIAGE_SHEET_ID, grouping_mode = "trainers")
+    read_triage_threshold_sheet(
+      TRIAGE_SHEET_ID,
+      grouping_mode = "trainers",
+      institution_email = triage_institution_email()
+    )
   })
 
   triage_unit_trainers <- reactive({
@@ -2838,7 +3061,60 @@ server <- function(input, output, session) {
   triage_sheet_df <- reactive({
     req(authed(), session_role() == "institution", input$tabs == triage_tab_label())
     triage_refresh_tick()
-    read_triage_threshold_sheet(TRIAGE_SHEET_ID, grouping_mode = grouping_mode())
+    read_triage_threshold_sheet(
+      TRIAGE_SHEET_ID,
+      grouping_mode = grouping_mode(),
+      institution_email = triage_institution_email()
+    )
+  })
+
+  triage_grouping_entities <- reactive({
+    triage_sheet_df() %>%
+      dplyr::filter(!is.na(.data$group_id), !is.na(.data$group), nzchar(trimws(.data$group))) %>%
+      dplyr::transmute(id = as.integer(.data$group_id), name = as.character(.data$group)) %>%
+      dplyr::distinct(.data$id, .keep_all = TRUE) %>%
+      dplyr::arrange(.data$name)
+  })
+
+  triage_grouping_user_links <- reactive({
+    entities <- triage_grouping_entities()
+
+    if (!nrow(entities)) {
+      return(tibble::tibble(user_id = integer(), group_id = integer(), group_name = character()))
+    }
+
+    if (identical(grouping_mode(), "trainers")) {
+      links <- get_legal_entity_trainers_users(entities$id)
+
+      if (!nrow(links)) {
+        return(tibble::tibble(user_id = integer(), group_id = integer(), group_name = character()))
+      }
+
+      links %>%
+        dplyr::transmute(user_id = as.integer(.data$user_id), group_id = as.integer(.data$trainer_id)) %>%
+        dplyr::distinct() %>%
+        dplyr::left_join(entities %>% dplyr::rename(group_id = id, group_name = name), by = "group_id") %>%
+        dplyr::filter(!is.na(.data$group_name), .data$group_name != "")
+    } else {
+      ug <- user_groups %>%
+        dplyr::transmute(user_id = as.integer(.data$user_id), group_id = as.integer(.data$group_id)) %>%
+        dplyr::distinct() %>%
+        dplyr::collect()
+
+      if (!nrow(ug)) {
+        return(tibble::tibble(user_id = integer(), group_id = integer(), group_name = character()))
+      }
+
+      ug %>%
+        dplyr::inner_join(entities %>% dplyr::rename(group_id = id, group_name = name), by = "group_id") %>%
+        dplyr::filter(!is.na(.data$group_name), .data$group_name != "")
+    }
+  })
+
+  triage_allowed_user_ids <- reactive({
+    ids <- c(triage_grouping_user_links()$user_id, triage_unit_user_links()$user_id)
+    ids <- unique(as.integer(ids))
+    ids[!is.na(ids)]
   })
 
   triage_sheet_group_thresholds <- reactive({
@@ -2849,7 +3125,7 @@ server <- function(input, output, session) {
     gid <- triage_selected_group()
     if (is.na(gid)) return(triage_threshold_defaults())
 
-    gdf <- grouping_entities()
+    gdf <- triage_grouping_entities()
     gname <- gdf$name[match(as.integer(gid), gdf$id)]
     resolve_triage_thresholds_for_group(
       sheet_df = triage_sheet_df(),
@@ -2914,7 +3190,7 @@ server <- function(input, output, session) {
         ) %>%
         dplyr::distinct(.data$user_id, .data$group_name, .keep_all = TRUE)
     } else {
-      grouping_user_links() %>%
+      triage_grouping_user_links() %>%
         dplyr::filter(.data$user_id %in% !!unique(as.integer(d$user_id))) %>%
         dplyr::distinct(.data$user_id, .data$group_id, .keep_all = TRUE)
     }
@@ -2946,7 +3222,7 @@ server <- function(input, output, session) {
     gid <- triage_selected_group()
     req(!is.na(gid))
 
-    grouping_user_links() %>%
+    triage_grouping_user_links() %>%
       dplyr::filter(.data$group_id == !!as.integer(gid)) %>%
       dplyr::transmute(user_id = as.integer(.data$user_id)) %>%
       dplyr::distinct()
@@ -2962,7 +3238,7 @@ server <- function(input, output, session) {
     gid <- triage_selected_group()
     req(!is.na(gid))
 
-    gdf <- grouping_entities()
+    gdf <- triage_grouping_entities()
     as.character(gdf$name[match(as.integer(gid), gdf$id)] %||% "")
   })
 
@@ -3351,7 +3627,11 @@ server <- function(input, output, session) {
   triage_report_sheet_df <- reactive({
     req(authed(), session_role() == "institution", input$tabs == triage_report_tab_label())
     triage_refresh_tick()
-    read_triage_threshold_sheet(TRIAGE_SHEET_ID, grouping_mode = "trainers")
+    read_triage_threshold_sheet(
+      TRIAGE_SHEET_ID,
+      grouping_mode = "trainers",
+      institution_email = triage_institution_email()
+    )
   })
 
   triage_report_units <- reactive({
@@ -6665,6 +6945,354 @@ server <- function(input, output, session) {
     p
   })
   
+  # ---- today -----
+
+  output$ui_today_group <- renderUI({
+    req(authed(), session_role() == "institution")
+    entities <- grouping_entities()
+    choices <- c("Todos" = "ALL")
+    if (nrow(entities) > 0) {
+      entity_choices <- entities$id
+      names(entity_choices) <- entities$name
+      choices <- c(choices, entity_choices)
+    }
+
+    selectInput(
+      "today_group",
+      label = paste0(grouping_label(grouping_mode(), plural = FALSE, title_case = TRUE), ":"),
+      choices = choices,
+      selected = "ALL",
+      width = "100%"
+    )
+  })
+
+  today_collection_name <- reactive({
+    if (identical(input$today_collection_mode %||% "full", "light")) "today_light_summarys" else "today_summarys"
+  })
+
+  today_users_df <- reactive({
+    req(authed(), session_role() == "institution")
+    inst_id <- req(selected_institution_id())
+    choice <- input$today_group %||% "ALL"
+    uids <- unique(as.integer(get_user_ids_for_institution_or_grouping(inst_id, choice, grouping_mode())))
+    names_df <- get_names_for_users(uids)
+    tibble::tibble(user_id = uids) %>%
+      dplyr::left_join(names_df, by = "user_id") %>%
+      dplyr::mutate(user_name = dplyr::coalesce(.data$name, paste0("user_", .data$user_id))) %>%
+      dplyr::select(user_id, user_name) %>%
+      dplyr::arrange(.data$user_name)
+  })
+
+  today_base_df <- reactive({
+    req(authed(), session_role() == "institution")
+    today_refresh_tick()
+    users_df <- today_users_df()
+    uids <- unique(as.integer(users_df$user_id))
+    if (!length(uids)) return(today_empty_df())
+
+    url.mongodb <- config[6]
+    query_user_id <- sprintf('{"user_id": {"$in": [%s]}}', paste(uids, collapse = ", "))
+    m <- mongolite::mongo(collection = today_collection_name(), url = url.mongodb)
+    on.exit(try(m$disconnect(), silent = TRUE), add = TRUE)
+    raw <- tryCatch(m$find(query = query_user_id), error = function(e) data.frame())
+    prepare_today_summaries(raw, users_df)
+  })
+
+  today_date_defaults <- reactive({
+    df <- today_base_df()
+    dates <- sort(unique(df$date[!is.na(df$date)]))
+    if (!length(dates)) return(list(start = Sys.Date(), end = Sys.Date()))
+    start <- if (length(dates) > 20) dates[length(dates) - 19] else min(dates)
+    list(start = start, end = max(dates))
+  })
+
+  output$ui_today_date_start <- renderUI({
+    defaults <- today_date_defaults()
+    dateInput("today_date_start", "Data inicial:", value = input$today_date_start %||% defaults$start)
+  })
+
+  output$ui_today_date_end <- renderUI({
+    defaults <- today_date_defaults()
+    dateInput("today_date_end", "Data final:", value = input$today_date_end %||% defaults$end)
+  })
+
+  today_filtered_df <- reactive({
+    df <- today_base_df()
+    if (!nrow(df)) return(today_empty_df())
+    defaults <- today_date_defaults()
+    start_date <- as.Date(input$today_date_start %||% defaults$start)
+    end_date <- as.Date(input$today_date_end %||% defaults$end)
+
+    df %>%
+      dplyr::filter(.data$date >= start_date, .data$date <= end_date) %>%
+      dplyr::mutate(
+        date_str = format(.data$date, "%d/%m/%Y"),
+        board_color_clean = dplyr::if_else(is.na(.data$board_color), "incompleto", .data$board_color),
+        text_color = dplyr::case_when(
+          .data$board_color == "red" ~ "white",
+          .data$board_color %in% c("green", "white", "yellow", "gray") ~ "black",
+          TRUE ~ "white"
+        ),
+        fill_label = factor(
+          .data$board_color_clean,
+          levels = c("incompleto", "gray", "green", "white", "yellow", "red"),
+          labels = c("incompleto", "linha de base", "acima do padrão", "dentro do padrão", "abaixo do padrão", "muito abaixo do padrão")
+        )
+      ) %>%
+      dplyr::filter(!is.na(.data$user_id)) %>%
+      dplyr::arrange(.data$date, .data$hour_complete) %>%
+      dplyr::mutate(
+        date_str = factor(.data$date_str, levels = unique(.data$date_str)),
+        user_name_plot = factor(.data$user_name, levels = rev(sort(unique(.data$user_name))))
+      )
+  })
+
+  today_download_df <- reactive({
+    df <- today_filtered_df()
+    if (!nrow(df)) return(tibble::tibble())
+    s_1 <- 0.125; s_2 <- 0.25; s_3 <- 0.75
+
+    out <- df %>%
+      dplyr::mutate(
+        s_happy = dplyr::case_when(.data$happy < s_1 ~ 4, .data$happy < s_2 ~ 3, .data$happy < s_3 ~ 2, TRUE ~ 1),
+        s_tired_out = dplyr::case_when(.data$tired_out < s_1 ~ 4, .data$tired_out < s_2 ~ 3, .data$tired_out < s_3 ~ 2, TRUE ~ 1),
+        s_night_of_sleep = dplyr::case_when(.data$night_of_sleep < s_1 ~ 4, .data$night_of_sleep < s_2 ~ 3, .data$night_of_sleep < s_3 ~ 2, TRUE ~ 1),
+        s_tense = dplyr::case_when(.data$tense < s_1 ~ 4, .data$tense < s_2 ~ 3, .data$tense < s_3 ~ 2, TRUE ~ 1),
+        dplyr::across(c("happy", "tired_out", "night_of_sleep", "tense"), ~ (.x - 0.5) * 4, .names = "{.col}_z")
+      ) %>%
+      dplyr::transmute(
+        Nome = .data$user_name,
+        Sessao = .data$session,
+        Velocidade = round(.data$velocity, 3),
+        Controle = round(.data$impulsiveness, 3),
+        Atencao = round(.data$inattention, 3),
+        Rotulo = .data$fill_label,
+        Disposicao = round(.data$tired_out_z, 3),
+        Ultima_noite_de_sono = round(.data$night_of_sleep_z, 3),
+        Relaxamento = round(.data$tense_z, 3),
+        Felicidade = round(.data$happy_z, 3),
+        Conclusao = .data$conclusion,
+        Data = format(.data$date, "%d-%m-%Y"),
+        Horario = .data$hour_complete
+      )
+    names(out) <- c("Nome", "Sessão", "Velocidade", "Controle", "Atenção", "Rótulo", "Disposição", "Última noite de sono", "Relaxamento", "Felicidade", "Conclusão", "Data", "Horário")
+    out
+  })
+
+  output$ui_today_status <- renderUI({
+    df <- today_filtered_df()
+    if (!nrow(df)) {
+      return(div(style = "font-weight:600; color:#777;", "Nenhum dado do Today encontrado para o escopo selecionado."))
+    }
+    div(style = "font-weight:600; color:#555;", sprintf("%s registros do Today no período selecionado.", format(nrow(df), big.mark = ".", decimal.mark = ",")))
+  })
+
+  output$ui_today_download_data <- renderUI({
+    req(nrow(today_filtered_df()) > 0)
+    downloadButton("today_download_data", "Download dos dados")
+  })
+
+  output$today_all_users_board <- renderPlotly({
+    req(authed(), session_role() == "institution", input$tabs == today_tab_label())
+    df <- today_filtered_df()
+    req(nrow(df) > 0)
+
+    pos <- dplyr::distinct(df, .data$user_name, .data$user_name_plot) %>%
+      dplyr::mutate(y = as.numeric(.data$user_name_plot))
+
+    n_users <- length(unique(df$user_name))
+    today_board_height(if (n_users > 15) n_users * 40 else 600)
+
+    p <- ggplot(df, ggplot2::aes(x = .data$date_str, y = .data$user_name_plot, key = .data$user_id)) +
+      ggplot2::geom_segment(
+        data = dplyr::distinct(df, .data$user_name_plot),
+        ggplot2::aes(y = .data$user_name_plot, yend = .data$user_name_plot, x = -Inf, xend = Inf),
+        inherit.aes = FALSE, color = "gray30", linetype = "dotted", size = 0.3
+      ) +
+      ggplot2::geom_hline(data = pos, ggplot2::aes(yintercept = .data$y), inherit.aes = FALSE, color = "gray30", linetype = "dotted", size = 0.3) +
+      ggplot2::geom_point(
+        ggplot2::aes(
+          fill = .data$fill_label,
+          text = paste0(.data$user_name, "<br>", .data$date_str, "<br>Clique para ter detalhes!")
+        ),
+        color = "white", shape = 21, size = 8, stroke = 0.7, show.legend = FALSE
+      ) +
+      ggplot2::geom_text(ggplot2::aes(label = .data$hour), color = df$text_color, size = 3, show.legend = FALSE) +
+      ggplot2::scale_fill_manual(
+        name = "",
+        values = c(
+          "incompleto" = "#272B30",
+          "linha de base" = "gray",
+          "acima do padrão" = "green",
+          "dentro do padrão" = "white",
+          "abaixo do padrão" = "yellow",
+          "muito abaixo do padrão" = "red"
+        )
+      ) +
+      ggplot2::theme_minimal(base_size = 12) +
+      ggplot2::labs(x = "", y = "") +
+      ggplot2::scale_x_discrete() +
+      ggplot2::theme(
+        axis.text.x = ggplot2::element_text(angle = 45, hjust = 1, color = "white"),
+        axis.text.y = ggplot2::element_text(color = "white", size = 12),
+        panel.background = ggplot2::element_rect(fill = "#272B30", color = "#272B30"),
+        plot.background = ggplot2::element_rect(fill = "#272B30", color = "#272B30"),
+        panel.grid = ggplot2::element_blank()
+      )
+
+    plotly::ggplotly(p, tooltip = "text", source = "today_board") %>%
+      plotly::event_register("plotly_click") %>%
+      plotly::layout(
+        legend = list(orientation = "h", x = 0.5, y = -0.3, xanchor = "center", yanchor = "top", font = list(size = 15, color = "white"))
+      )
+  })
+
+  output$ui_today_all_users_board <- renderUI({
+    req(nrow(today_filtered_df()) > 0)
+    plotlyOutput("today_all_users_board", height = paste0(today_board_height(), "px"))
+  })
+
+  today_user_df <- reactive({
+    uid <- today_selected_user_id()
+    req(!is.na(uid))
+    df <- today_filtered_df() %>% dplyr::filter(.data$user_id == uid) %>% dplyr::arrange(.data$created_at)
+    req(nrow(df) > 0)
+
+    s_1 <- 0.125; s_2 <- 0.25; s_3 <- 0.75
+    df <- df %>%
+      dplyr::mutate(
+        date_gr = format(.data$date, "%d-%m-%Y"),
+        happy_z = (.data$happy - 0.5) * 4,
+        tired_out_z = (.data$tired_out - 0.5) * 4,
+        night_of_sleep_z = (.data$night_of_sleep - 0.5) * 4,
+        tense_z = (.data$tense - 0.5) * 4,
+        s_happy = dplyr::case_when(.data$happy < s_1 ~ "red", .data$happy < s_2 ~ "yellow", .data$happy < s_3 ~ "white", TRUE ~ "green"),
+        s_tired_out = dplyr::case_when(.data$tired_out < s_1 ~ "red", .data$tired_out < s_2 ~ "yellow", .data$tired_out < s_3 ~ "white", TRUE ~ "green"),
+        s_night_of_sleep = dplyr::case_when(.data$night_of_sleep < s_1 ~ "red", .data$night_of_sleep < s_2 ~ "yellow", .data$night_of_sleep < s_3 ~ "white", TRUE ~ "green"),
+        s_tense = dplyr::case_when(.data$tense < s_1 ~ "red", .data$tense < s_2 ~ "yellow", .data$tense < s_3 ~ "white", TRUE ~ "green")
+      )
+
+    values_long <- df %>%
+      dplyr::select(date_gr, session, inattention, impulsiveness, velocity, happy_z, tired_out_z, night_of_sleep_z, tense_z) %>%
+      tidyr::pivot_longer(cols = -c(date_gr, session), names_to = "metric", values_to = "value")
+
+    colors_long <- df %>%
+      dplyr::transmute(
+        date_gr = .data$date_gr,
+        session = .data$session,
+        inattention = .data$c.inattention,
+        impulsiveness = .data$c.impulsiveness,
+        velocity = .data$c.velocity,
+        happy_z = .data$s_happy,
+        tired_out_z = .data$s_tired_out,
+        night_of_sleep_z = .data$s_night_of_sleep,
+        tense_z = .data$s_tense
+      ) %>%
+      tidyr::pivot_longer(cols = -c(date_gr, session), names_to = "metric", values_to = "s_color")
+
+    labels <- c(
+      inattention = "Atenção",
+      impulsiveness = "Controle",
+      velocity = "Velocidade",
+      happy_z = "Felicidade",
+      tired_out_z = "Disposição",
+      night_of_sleep_z = "Última noite de sono",
+      tense_z = "Relaxamento"
+    )
+
+    values_long %>%
+      dplyr::left_join(colors_long, by = c("date_gr", "session", "metric")) %>%
+      dplyr::mutate(
+        value = pmax(pmin(as.numeric(.data$value), 2), -2),
+        variable = unname(labels[.data$metric])
+      ) %>%
+      dplyr::filter(!is.na(.data$value), !is.na(.data$s_color))
+  })
+
+  output$ui_today_user_detail <- renderUI({
+    uid <- today_selected_user_id()
+    if (is.na(uid)) return(NULL)
+    df <- today_user_df()
+    user_name <- today_filtered_df()$user_name[match(uid, today_filtered_df()$user_id)] %||% paste0("user_", uid)
+
+    tagList(
+      div(
+        style = "border:1px solid #eee; border-radius:8px; padding:12px; text-align:center;",
+        h3(paste0("Você selecionou: ", user_name)),
+        checkboxGroupInput(
+          "today_selected_stamp",
+          "Selecione a capacidade",
+          choices = unique(df$variable),
+          selected = unique(df$variable)[1],
+          inline = TRUE
+        )
+      ),
+      br(),
+      plotlyOutput("plot_today_sessions")
+    )
+  })
+
+  output$plot_today_sessions <- renderPlotly({
+    req(input$today_selected_stamp)
+    df <- today_user_df() %>%
+      dplyr::filter(.data$variable %in% input$today_selected_stamp) %>%
+      dplyr::mutate(plotytext = paste0(.data$variable, "\n", .data$date_gr))
+    req(nrow(df) > 0)
+
+    p <- ggplot(df, ggplot2::aes(x = .data$session, y = .data$value, text = .data$plotytext)) +
+      ggplot2::geom_hline(yintercept = c(2.1, 1, 0, -1, -1.75, -2.1), color = c("white", "green", "gray", "yellow", "red", "white"), size = c(.02, 1, .5, 1, 1, .02)) +
+      ggplot2::geom_line(ggplot2::aes(color = .data$variable, group = .data$variable), size = 1.2) +
+      ggplot2::geom_point(color = df$s_color, size = 3) +
+      ggplot2::scale_x_continuous(breaks = df$session, labels = df$date_gr) +
+      ggplot2::ylim(-2.2, 2.2) +
+      ggplot2::theme_minimal(base_size = 12) +
+      ggplot2::labs(x = NULL, y = NULL, color = NULL, fill = NULL) +
+      ggplot2::theme(
+        legend.position = "bottom",
+        plot.background = ggplot2::element_rect(fill = "#272B30", color = "#272B30"),
+        panel.background = ggplot2::element_rect(fill = "#272B30", color = "#272B30"),
+        panel.grid = ggplot2::element_blank(),
+        axis.text.x = ggplot2::element_text(angle = 45, hjust = 1, color = "white"),
+        axis.text.y = ggplot2::element_blank(),
+        legend.text = ggplot2::element_text(color = "white")
+      )
+
+    plotly::ggplotly(p, tooltip = "text") %>%
+      plotly::layout(legend = list(orientation = "h", x = 0.5, y = -0.5, xanchor = "center", yanchor = "top", font = list(size = 15)))
+  })
+
+  output$today_download_data <- downloadHandler(
+    filename = function() {
+      sprintf("sensorial_today_%s_%s.xlsx", input$today_group %||% "ALL", Sys.Date())
+    },
+    content = function(file) {
+      df <- today_download_df()
+      if (!requireNamespace("openxlsx", quietly = TRUE)) {
+        write.csv(df, file, row.names = FALSE, fileEncoding = "UTF-8")
+      } else {
+        openxlsx::write.xlsx(df, file, na = "")
+      }
+    }
+  )
+
+  observeEvent(input$today_refresh_data, {
+    today_selected_user_id(NA_integer_)
+    today_refresh_tick(isolate(today_refresh_tick()) + 1L)
+    showNotification("Dados do Today atualizados.", type = "message", duration = 3)
+  }, ignoreInit = TRUE)
+
+  observeEvent(list(input$today_group, input$today_collection_mode, grouping_mode()), {
+    today_selected_user_id(NA_integer_)
+  }, ignoreInit = TRUE)
+
+  observeEvent(plotly::event_data("plotly_click", source = "today_board"), {
+    req(authed(), session_role() == "institution", input$tabs == today_tab_label())
+    ev <- plotly::event_data("plotly_click", source = "today_board")
+    req(!is.null(ev), nrow(ev) > 0)
+    uid <- suppressWarnings(as.integer(ev$key[[1]]))
+    req(!is.na(uid))
+    today_selected_user_id(uid)
+  }, ignoreInit = TRUE)
   # ===================== observers =====================
   
   # ---- general -----
@@ -6689,7 +7317,9 @@ server <- function(input, output, session) {
   
   observeEvent(TRUE, {
     removeTab(inputId = "tabs", target = triage_tab_label())
+    removeTab(inputId = "tabs", target = today_tab_label())
     triage_tab_visible(FALSE)
+    today_tab_visible(FALSE)
   }, once = TRUE)
 
   observeEvent(TRUE, { showModal(login_modal()) }, once = TRUE)
@@ -6705,6 +7335,8 @@ server <- function(input, output, session) {
       pass  <- "CityVida07"
       email <- "sensorial.botafogo@safbfr.com.br"
       pass  <- "8hGyx5"
+      email <- "comercialfc@sensorial.life"
+      pass  <- "Cc8888"
       # email <- "deise.superaonline@franquiasupera.com.br"
       # pass  <- "Cc8888"
     }else{
@@ -6761,6 +7393,17 @@ server <- function(input, output, session) {
       "luana@cityvida.com.br",
       "sensorial.botafogo@safbfr.com.br"
     )
+
+    if (!isTRUE(today_tab_visible())) {
+      insertTab(
+        inputId = "tabs",
+        tab = today_tab_panel(),
+        target = "Rankings",
+        position = "after",
+        select = FALSE
+      )
+      today_tab_visible(TRUE)
+    }
 
     if (can_see_triage && !isTRUE(triage_tab_visible())) {
       insertTab(
@@ -6994,7 +7637,7 @@ server <- function(input, output, session) {
         triage_page(1L)
       }
     } else {
-      gdf <- grouping_entities()
+      gdf <- triage_grouping_entities()
       gid <- gdf$id[match(clicked_name, gdf$name)]
       if (!is.na(gid)) {
         triage_selected_group(as.integer(gid))
@@ -7068,7 +7711,7 @@ server <- function(input, output, session) {
     gid <- triage_selected_group()
     req(!is.na(gid))
 
-    gdf <- grouping_entities()
+    gdf <- triage_grouping_entities()
     gname <- gdf$name[match(as.integer(gid), gdf$id)] %||% ""
 
     vals <- c(
@@ -7086,7 +7729,8 @@ server <- function(input, output, session) {
       group_id = as.integer(gid),
       group_name = as.character(gname),
       values_named = vals,
-      grouping_mode = grouping_mode()
+      grouping_mode = grouping_mode(),
+      institution_email = triage_institution_email()
     )
 
     if (isTRUE(ok)) {
