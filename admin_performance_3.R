@@ -24,7 +24,7 @@ suppressPackageStartupMessages({
   library(plotly)
 })
 
-is_local <- 1
+is_local <- 0
 is_debug <- 0
 is_manager <- 0
 
@@ -33,6 +33,7 @@ is_manager <- 0
 directory <- tryCatch(paste0(dirname(rstudioapi::getSourceEditorContext()$path), "/"),error = function(e) "./")
 
 source(paste0(directory, "Env.Data.R"))
+source(paste0(directory, "measurement_article_scores.R"))
 
 config <- if (is_debug) getHomEnvConfig() else getProdEnvConfig()
 
@@ -260,31 +261,32 @@ hc_with_soft_anim <- function(hc) {
 }
 
 hc_gauge_pct <- function(value_pct, title_txt) {
+  value_pct <- round(as.numeric(value_pct), 2)
   hc_with_soft_anim(
     highchart() %>%
-      hc_chart(type = "solidgauge") %>%
-      hc_title(text = title_txt, style = list(fontSize = "14px")) %>%
-      hc_pane(center = list('50%', '85%'), size = '120%',
-              startAngle = -90, endAngle = 90,
-              background = list(
-                list(outerRadius = '100%', innerRadius = '60%', shape = 'arc')
-              )) %>%
-      hc_yAxis(min = 0, max = 100, stops = list(
-        list(0.3, "#f15c80"),
-        list(0.6, "#f7a35c"),
-        list(1.0, "#90ed7d")
-      ),
-      title = list(text = NULL),
-      lineWidth = 0, tickInterval = 25,
-      labels = list(y = 16)) %>%
-      hc_series(
-        list(
-          name = "Percent",
-          data = list(round(as.numeric(value_pct), 2)),
-          dataLabels = list(format = '<span style="font-size:18px">{y}%</span>')
-        )
+      hc_chart(type = "solidgauge", backgroundColor = "transparent", spacing = c(8, 8, 8, 8)) %>%
+      hc_title(text = title_txt, style = list(fontSize = "13px", fontWeight = "600", color = "#13232B")) %>%
+      hc_pane(
+        center = list("50%", "82%"), size = "118%", startAngle = -90, endAngle = 90,
+        background = list(list(outerRadius = "100%", innerRadius = "74%", shape = "arc", backgroundColor = "#EEF2F3", borderWidth = 0))
       ) %>%
-      hc_tooltip(enabled = FALSE)
+      hc_yAxis(
+        min = 0, max = 100, lineWidth = 0, tickWidth = 0, minorTickInterval = NULL,
+        tickPositions = c(0, 25, 50, 75, 100), title = list(text = NULL),
+        labels = list(y = 15, style = list(color = "#667781", fontSize = "10px")),
+        stops = list(list(0.35, "#EF4444"), list(0.7, "#FACC15"), list(1, "#32D583"))
+      ) %>%
+      hc_series(list(
+        name = title_txt,
+        data = list(value_pct),
+        dataLabels = list(
+          y = -26, borderWidth = 0, useHTML = TRUE,
+          format = '<div style="text-align:center"><span style="font-size:26px;font-weight:300;color:#071016">{y:.1f}%</span></div>'
+        )
+      )) %>%
+      hc_tooltip(enabled = FALSE) %>%
+      hc_credits(enabled = FALSE) %>%
+      hc_exporting(enabled = TRUE)
   )
 }
 
@@ -295,34 +297,55 @@ hc_cols_users_members <- function(amount_users, amount_members) {
   )
   hc_with_soft_anim(
     highchart() %>%
-      hc_title(text = "Usuários vs Membros") %>%
-      hc_xAxis(categories = df$Category) %>%
-      hc_yAxis(title = list(text = NULL)) %>%
-      hc_add_series(type = "column", data = df$Value, name = "Quantidade") %>%
-      hc_plotOptions(column = list(dataLabels = list(enabled = TRUE)))
+      hc_chart(type = "column", backgroundColor = "transparent", spacing = c(8, 8, 8, 8)) %>%
+      hc_title(text = "Usuários vs Membros", style = list(fontSize = "16px", fontWeight = "300", color = "#071016")) %>%
+      hc_xAxis(categories = df$Category, lineColor = "#D8E0E2", tickLength = 0, labels = list(style = list(color = "#13232B"))) %>%
+      hc_yAxis(title = list(text = NULL), gridLineColor = "#E8EDEE", labels = list(style = list(color = "#667781"))) %>%
+      hc_add_series(type = "column", data = df$Value, name = "Quantidade", color = "#32D583") %>%
+      hc_plotOptions(column = list(borderWidth = 0, borderRadius = 6, dataLabels = list(enabled = TRUE, style = list(color = "#071016", textOutline = "none")))) %>%
+      hc_legend(enabled = FALSE) %>%
+      hc_credits(enabled = FALSE) %>%
+      hc_exporting(enabled = TRUE)
   )
 }
 
 hc_bar_feelings <- function(happy, tired_out, tense, night_of_sleep) {
   df <- tibble::tibble(
     Feeling = c("Feliz", "Cansado", "Tenso", "Noite de sono"),
-    Score   = c(happy, tired_out, tense, night_of_sleep) * 100
+    Score = c(happy, tired_out, tense, night_of_sleep) * 100
   )
   hc_with_soft_anim(
     highchart() %>%
-      hc_title(text = "Médias de sentimentos") %>%
-      hc_xAxis(categories = df$Feeling) %>%
-      hc_yAxis(title = list(text = "%"), max = 100) %>%
-      hc_add_series(type = "bar", data = round(df$Score, 1), name = "Percentual") %>%
-      hc_plotOptions(series = list(dataLabels = list(enabled = TRUE, format = "{point.y:.1f}%")))
+      hc_chart(type = "bar", backgroundColor = "transparent", spacing = c(8, 8, 8, 8)) %>%
+      hc_title(text = "Médias de sentimentos", style = list(fontSize = "16px", fontWeight = "300", color = "#071016")) %>%
+      hc_xAxis(categories = df$Feeling, lineWidth = 0, labels = list(style = list(color = "#13232B"))) %>%
+      hc_yAxis(title = list(text = "%"), min = 0, max = 100, gridLineColor = "#E8EDEE", labels = list(style = list(color = "#667781"))) %>%
+      hc_add_series(type = "bar", data = round(df$Score, 1), name = "Percentual", color = "#22D3EE") %>%
+      hc_plotOptions(series = list(borderWidth = 0, borderRadius = 6, dataLabels = list(enabled = TRUE, format = "{point.y:.1f}%", style = list(color = "#071016", textOutline = "none")))) %>%
+      hc_legend(enabled = FALSE) %>%
+      hc_credits(enabled = FALSE) %>%
+      hc_exporting(enabled = TRUE)
   )
 }
 
 kpi_card <- function(title, value, subtitle = NULL) {
-  div(style="border:1px solid #eee; border-radius:10px; padding:16px; background:#fff; box-shadow:0 1px 3px rgba(0,0,0,0.05);",
-      div(style="font-size:13px; color:#666; margin-bottom:6px;", title),
-      div(style="font-size:28px; font-weight:700;", value),
-      if (!is.null(subtitle)) div(style="font-size:12px; color:#888; margin-top:4px;", subtitle)
+  div(
+    class = "metric-card",
+    div(class = "metric-label", title),
+    div(class = "metric-value", value),
+    if (!is.null(subtitle)) div(class = "metric-subtitle", subtitle)
+  )
+}
+
+ranking_podium_card <- function(row, place) {
+  medal <- c("1" = "OURO", "2" = "PRATA", "3" = "BRONZE")[[as.character(place)]] %||% "RANK"
+  div(
+    class = paste("ranking-podium-card", paste0("rank-", place)),
+    div(class = "ranking-medal", medal),
+    div(class = "ranking-rank", paste0("#", row$rank_display[[1]])),
+    div(class = "ranking-name", row$display_name[[1]]),
+    div(class = "ranking-score", scales::comma(row$score[[1]], accuracy = 1)),
+    div(class = "ranking-neurons", paste0("Neurons ", scales::comma(row$neurons[[1]], accuracy = 1)))
   )
 }
 
@@ -605,13 +628,23 @@ triage_report_tab_panel <- function() {
 }
 
 today_tab_label <- function() {
-  "Today"
+  "Monitoramento"
 }
 
 today_tab_panel <- function() {
   tabPanel(
     today_tab_label(),
     br(),
+    div(
+      class = "today-mode-switch",
+      radioButtons(
+        "today_usage_mode",
+        label = NULL,
+        choices = c("Utilização" = "usage", "Não-Utilização" = "nonuse"),
+        selected = "usage",
+        inline = TRUE
+      )
+    ),
     fluidRow(
       align = "center",
       column(
@@ -620,38 +653,59 @@ today_tab_panel <- function() {
           style = "display:flex; justify-content:center; margin: 8px 0 16px 0;",
           radioButtons(
             "today_collection_mode",
-            label = "Base do Today:",
-            choices = c("Completo" = "full", "Light" = "light"),
-            selected = "full",
+            label = "Base do Monitoramento:",
+            choices = c("Today Light" = "light", "Today" = "full"),
+            selected = "light",
             inline = TRUE
           )
         )
       )
     ),
+    fluidRow(align = "center", uiOutput("ui_today_bucket_mode")),
     fluidRow(
       align = "center",
       column(4),
       column(4, uiOutput("ui_today_group")),
       column(4)
     ),
-    fluidRow(
-      align = "center",
-      column(3),
-      column(2, uiOutput("ui_today_date_start")),
-      column(2, uiOutput("ui_today_date_end")),
-      column(2, div(style = "margin-top:25px;", actionButton("today_refresh_data", "Atualizar dados"))),
-      column(3)
+    conditionalPanel(
+      condition = "input.today_usage_mode == 'usage' || input.today_usage_mode == null",
+      fluidRow(
+        align = "center",
+        column(3),
+        column(2, uiOutput("ui_today_date_start")),
+        column(2, uiOutput("ui_today_date_end")),
+        column(2, div(style = "margin-top:25px;", actionButton("today_refresh_data", "Atualizar dados"))),
+        column(3)
+      ),
+      br(),
+      fluidRow(
+        align = "center",
+        checkboxInput("today_show_absent", "Mostrar usuários sem registro no período", value = FALSE)
+      ),
+      fluidRow(align = "center", uiOutput("ui_today_status")),
+      fluidRow(align = "center", uiOutput("ui_today_download_data")),
+      br(),
+      uiOutput("ui_today_all_users_board"),
+      br(),
+      uiOutput("ui_today_user_detail")
     ),
-    br(),
-    fluidRow(align = "center", uiOutput("ui_today_status")),
-    fluidRow(align = "center", uiOutput("ui_today_download_data")),
-    br(),
-    uiOutput("ui_today_all_users_board"),
-    br(),
-    uiOutput("ui_today_user_detail")
+    conditionalPanel(
+      condition = "input.today_usage_mode == 'nonuse'",
+      div(
+        class = "today-nonuse-panel",
+        fluidRow(
+          align = "center",
+          column(4, selectInput("today_nonuse_days", "Sem monitorar nos últimos", choices = stats::setNames(1:90, paste0(1:90, " dias")), selected = 7, width = "100%")),
+          column(8, radioButtons("today_nonuse_order", "Ordenar por", choices = c("Ordem alfabética" = "name", "Quantidade de medidas" = "count", "Última medida" = "last"), selected = "name", inline = TRUE))
+        ),
+        br(),
+        uiOutput("ui_today_nonuse_status"),
+        div(class = "today-nonuse-table", DTOutput("tbl_today_nonuse"))
+      )
+    )
   )
 }
-
 today_empty_df <- function() {
   tibble::tibble(
     user_id = integer(), user_name = character(), hour = numeric(), hour_complete = character(),
@@ -2010,9 +2064,113 @@ answers_dist_two_pops <- function(df,question_id,pop1_uids, pop1_label,pop2_uids
 # --------------------- UI() ---------------------------------
 
 ui <- fluidPage(
-  tags$head(tags$meta(charset = "utf-8")),
-  div(style="text-align:center; margin:16px 0 8px 0;",
-      img(src = "sensorial_logo.png", style="max-width:380px; width:40%; height:auto;", alt="Sensorial Logo")
+  tags$head(
+    tags$meta(charset = "utf-8"),
+    tags$style(HTML("
+      :root {
+        --perf-bg: #F7F8F4;
+        --perf-ink: #071016;
+        --perf-ink-soft: #13232B;
+        --perf-line: rgba(11, 25, 33, .10);
+        --perf-line-strong: rgba(11, 25, 33, .22);
+        --perf-muted: #667781;
+        --perf-card: rgba(255, 255, 255, .74);
+        --perf-cyan: #22D3EE;
+        --perf-green: #32D583;
+        --perf-lime: #B9F455;
+      }
+      html, body {
+        min-height: 100%;
+        background:
+          linear-gradient(115deg, rgba(34, 211, 238, .11), transparent 31%),
+          linear-gradient(245deg, rgba(50, 213, 131, .10), transparent 34%),
+          var(--perf-bg) !important;
+        color: var(--perf-ink);
+      }
+      body::before {
+        content: '';
+        position: fixed;
+        inset: 0;
+        pointer-events: none;
+        opacity: .55;
+        background-image: url(data:image/svg+xml,%3Csvg%20xmlns=%22http://www.w3.org/2000/svg%22%20width=%221600%22%20height=%22900%22%20viewBox=%220%200%201600%20900%22%3E%3Cg%20fill=%22none%22%20stroke=%22%23071016%22%20stroke-opacity=%22.13%22%20stroke-width=%221%22%3E%3Cpath%20d=%22M160%20160%20L360%20240%20L560%20160%20L770%20260%20L990%20190%20L1220%20305%20L1450%20230%22/%3E%3Cpath%20d=%22M360%20240%20L322%20365%20L462%20420%20L560%20160%20L605%20310%20L770%20260%20L730%20410%20L845%20500%20L990%20190%20L1095%20360%20L1220%20305%20L1190%20468%20L1320%20548%22/%3E%3Cpath%20d=%22M462%20420%20L390%20560%20L530%20635%20L605%20310%20L675%20575%20L845%20500%20L810%20690%20L970%20760%20L1095%20360%20L1045%20610%20L1190%20468%20L1260%20720%22/%3E%3Ccircle%20cx=%22160%22%20cy=%22160%22%20r=%223%22/%3E%3Ccircle%20cx=%22360%22%20cy=%22240%22%20r=%223%22/%3E%3Ccircle%20cx=%22560%22%20cy=%22160%22%20r=%223%22/%3E%3Ccircle%20cx=%22770%22%20cy=%22260%22%20r=%223%22/%3E%3Ccircle%20cx=%22990%22%20cy=%22190%22%20r=%223%22/%3E%3Ccircle%20cx=%221220%22%20cy=%22305%22%20r=%223%22/%3E%3Ccircle%20cx=%221450%22%20cy=%22230%22%20r=%223%22/%3E%3C/g%3E%3C/svg%3E);
+        background-size: cover;
+        background-position: center top;
+        mask-image: linear-gradient(to bottom, black 0%, black 58%, transparent 100%);
+      }
+      body, button, input, select, textarea { font-family: 'Segoe UI Variable', 'Segoe UI', sans-serif; }
+      .container-fluid { width: 100%; max-width: none; padding: 0 28px 36px; position: relative; }
+      .performance-hero { display: flex; align-items: center; justify-content: center; min-height: 128px; padding: 26px 0 12px; position: relative; }
+      .performance-hero img { max-width: 330px; width: 24vw; min-width: 210px; height: auto; opacity: .76; }
+      .performance-title { text-align: right; max-width: 520px; position: absolute; right: 0; }
+      .performance-title .eyebrow { color: var(--perf-muted); font-size: 10px; font-weight: 700; letter-spacing: .28em; text-transform: uppercase; }
+      .performance-title h1 { margin: 2px 0 0; color: var(--perf-ink); font-size: clamp(25px, 3.6vw, 48px); font-weight: 300; letter-spacing: -.065em; }
+      .performance-title p { margin: 2px 0 0; color: var(--perf-muted); font-size: 12px; letter-spacing: .02em; }
+      .performance-scope-bar { display: grid; grid-template-columns: minmax(260px, .9fr) minmax(360px, 1.1fr); gap: 1px; margin: 8px 0 22px; border: 1px solid var(--perf-line-strong); background: rgba(255,255,255,.54); backdrop-filter: blur(18px); box-shadow: 0 18px 60px rgba(7,16,22,.07); }
+      .scope-identity, .scope-control { padding: 18px 20px; background: rgba(255,255,255,.44); }
+      .scope-kicker { color: var(--perf-muted); font-size: 10px; font-weight: 800; letter-spacing: .24em; text-transform: uppercase; }
+      .scope-name { color: var(--perf-ink); font-size: 20px; font-weight: 650; letter-spacing: -.035em; line-height: 1.1; margin-top: 5px; }
+      .scope-meta { color: var(--perf-muted); font-size: 11px; margin-top: 7px; }
+      .scope-control .form-group { margin-bottom: 0; }
+      .scope-control .control-label { color: var(--perf-muted); display: block; font-size: 10px; font-weight: 800; letter-spacing: .24em; text-transform: uppercase; margin-bottom: 11px; }
+      .scope-control .radio-inline { margin-right: 24px; padding-left: 22px; color: var(--perf-ink-soft); font-weight: 650; }
+      .scope-control input[type='radio'] { accent-color: var(--perf-green); }
+      .scope-control .radio-inline:has(input:checked) { color: var(--perf-ink); text-decoration: underline; text-decoration-color: var(--perf-green); text-decoration-thickness: 3px; text-underline-offset: 7px; }
+      .nav-tabs { border: 0; display: flex; gap: 28px; flex-wrap: wrap; margin: 0 0 16px; padding-left: 2px; }
+      .nav-tabs > li { float: none; margin: 0; }
+      .nav-tabs > li > a { margin: 0; padding: 7px 0 9px; border: 0 !important; border-radius: 0 !important; background: transparent !important; color: var(--perf-muted); font-size: 13px; font-weight: 650; letter-spacing: .01em; }
+      .nav-tabs > li > a:hover { color: var(--perf-ink); }
+      .nav-tabs > li.active > a, .nav-tabs > li.active > a:focus, .nav-tabs > li.active > a:hover { color: var(--perf-ink) !important; background: transparent !important; border: 0 !important; box-shadow: inset 0 -2px 0 var(--perf-green); }
+      .tab-content { background: rgba(255,255,255,.70); border: 1px solid var(--perf-line); padding: 28px 18px 30px; box-shadow: 0 22px 70px rgba(7,16,22,.07); backdrop-filter: blur(14px); min-height: 640px; }
+      .form-control, .selectize-input { border-radius: 0 !important; border: 0 !important; border-bottom: 1px solid var(--perf-line-strong) !important; background: rgba(255,255,255,.38) !important; box-shadow: none !important; }
+      .btn, .btn-default, .btn-primary { border-radius: 0 !important; border: 1px solid var(--perf-line-strong) !important; background: transparent !important; color: var(--perf-ink) !important; font-weight: 650 !important; box-shadow: none !important; }
+      .btn:hover, .btn-default:hover, .btn-primary:hover, .download-button:hover { border-color: var(--perf-green) !important; color: var(--perf-ink) !important; background: rgba(50,213,131,.10) !important; }
+      .dataTables_wrapper, .well, .shiny-output-error-validation { border-radius: 0; background: rgba(255,255,255,.62); border: 1px solid var(--perf-line); padding: 10px; }
+      h3, h4 { color: var(--perf-ink); font-weight: 350; letter-spacing: -.04em; }
+      .metric-card { min-height: 154px; border: 1px solid var(--perf-line); background: rgba(255,255,255,.62); padding: 24px; display: flex; flex-direction: column; justify-content: center; }
+      .metric-label { color: var(--perf-muted); font-size: 12px; letter-spacing: .08em; text-transform: uppercase; }
+      .metric-value { color: var(--perf-ink); font-size: 48px; line-height: 1; font-weight: 300; letter-spacing: -.06em; margin-top: 12px; }
+      .metric-subtitle { color: var(--perf-muted); font-size: 11px; margin-top: 8px; }
+      .ranking-shell { border: 1px solid var(--perf-line); background: rgba(255,255,255,.58); padding: 18px; margin-bottom: 18px; }
+      .ranking-podium { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; margin-top: 14px; }
+      .ranking-podium-card { min-height: 158px; border: 1px solid var(--perf-line-strong); background: rgba(255,255,255,.72); padding: 18px; position: relative; overflow: hidden; }
+      .ranking-podium-card::before { content: ''; position: absolute; inset: auto 18px 0 18px; height: 3px; background: var(--perf-green); }
+      .ranking-podium-card.rank-1 { transform: translateY(-8px); background: linear-gradient(135deg, rgba(185,244,85,.22), rgba(255,255,255,.78)); }
+      .ranking-podium-card.rank-2 { background: linear-gradient(135deg, rgba(34,211,238,.17), rgba(255,255,255,.76)); }
+      .ranking-podium-card.rank-3 { background: linear-gradient(135deg, rgba(250,204,21,.18), rgba(255,255,255,.74)); }
+      .ranking-medal { color: var(--perf-muted); font-size: 10px; font-weight: 800; letter-spacing: .22em; }
+      .ranking-rank { color: var(--perf-ink); font-size: 42px; line-height: 1; font-weight: 250; letter-spacing: -.08em; margin-top: 8px; }
+      .ranking-name { color: var(--perf-ink); font-size: 16px; font-weight: 700; margin-top: 8px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      .ranking-score { color: var(--perf-ink); font-size: 30px; font-weight: 300; letter-spacing: -.05em; margin-top: 12px; }
+      .ranking-neurons { color: var(--perf-muted); font-size: 12px; margin-top: 2px; }
+      #today_all_users_board, #today_daily_air, #plot_today_sessions { border-radius: 0; overflow: hidden; border: 1px solid #E2E8E8; box-shadow: 0 18px 44px rgba(7,16,22,.08); }
+      .today-mode-switch { display:flex; justify-content:center; margin: 0 0 22px; }
+      .today-mode-switch .form-group { margin-bottom: 0; }
+      .today-mode-switch .control-label { display: none; }
+      .today-mode-switch .radio-inline { margin: 0 4px; padding: 9px 18px 10px 38px; border: 1px solid var(--perf-line-strong); background: rgba(255,255,255,.55); color: var(--perf-muted); font-weight: 750; letter-spacing: .01em; }
+      .today-mode-switch .radio-inline:has(input:checked) { background: rgba(50,213,131,.14); border-color: var(--perf-green); color: var(--perf-ink); box-shadow: inset 0 -2px 0 var(--perf-green); }
+      .today-nonuse-panel { max-width: 1120px; margin: 8px auto 0; border: 1px solid var(--perf-line); background: rgba(255,255,255,.62); padding: 18px; }
+      .today-nonuse-table .dataTables_wrapper { background: transparent; border: 0; padding: 0; }
+      @media (max-width: 900px) { .ranking-podium { grid-template-columns: 1fr; } .ranking-podium-card.rank-1 { transform: none; } }
+      @media (max-width: 900px) {
+        .container-fluid { padding: 0 14px 24px; }
+        .performance-hero { display: block; text-align: center; }
+        .performance-title { position: static; text-align: center; margin: 10px auto 0; }
+        .performance-scope-bar { grid-template-columns: 1fr; }
+        .nav-tabs { gap: 16px; }
+        .tab-content { padding: 18px 10px; }
+      }
+    "))
+  ),
+  div(
+    class = "performance-hero",
+    img(src = "sensorial_logo.png", alt = "Sensorial Logo"),
+    div(
+      class = "performance-title",
+      div(class = "eyebrow", "Admin Performance"),
+      h1("acompanhe a cognição"),
+      p("com sinais operacionais, agrupamentos e performance em fluxo contínuo")
+    )
   ),
   fluidRow(
     column(
@@ -2021,7 +2179,7 @@ ui <- fluidPage(
       uiOutput("ui_status_panel"),
       tabsetPanel(id = "tabs",
                   # ---- overview -----
-                  tabPanel("Overview",
+                  tabPanel("Visão Geral",
                            br(),
                            fluidRow(
                              column(6, highchartOutput("hc_users_members", height = "280px")),
@@ -2156,6 +2314,14 @@ ui <- fluidPage(
                   tabPanel(
                     "Medidas Moove",
                     br(),
+                    div(
+                      style = "display:flex; justify-content:center; margin:8px 0 8px 0;",
+                      radioButtons(
+                        "mm_scale_mode", label = NULL, inline = TRUE,
+                        choices = c("Pontuação Moove" = "moove", "Escala dos artigos" = "articles"),
+                        selected = "moove"
+                      )
+                    ),
                     # uiOutput("ui_mm_status"),
                     div(
                       style = "display:flex; justify-content:center; margin: 8px 0 16px 0;",
@@ -2176,7 +2342,8 @@ ui <- fluidPage(
                       uiOutput("ui_mm_pager")
                     ),
                     br(),
-                    uiOutput("ui_mm_detail")
+                    uiOutput("ui_mm_detail"),
+                    uiOutput("ui_mm_article_method")
                   ),
                   
                   # ---- answers ----
@@ -4016,6 +4183,60 @@ server <- function(input, output, session) {
     get_measurement_summaries_cached(uids, inst_id, choice)
   })
   
+  mm_scale_is_articles <- reactive({
+    identical(input$mm_scale_mode %||% "moove", "articles")
+  })
+
+  mm_article_cache <- new.env(parent = emptyenv())
+
+  mm_article_df <- reactive({
+    req(authed(), session_role() == "institution", input$tabs == "Medidas Moove")
+    inst_id <- selected_institution_id()
+    choice <- input$sel_group %||% "ALL"
+    uids <- scope_user_ids()
+    key <- paste(inst_id, choice, paste(sort(unique(uids)), collapse = ","), sep = "|")
+    if (!exists(key, envir = mm_article_cache, inherits = FALSE)) {
+      assign(key, get_article_measure_scores(pool, uids), envir = mm_article_cache)
+    }
+    get(key, envir = mm_article_cache, inherits = FALSE)
+  })
+
+  mm_article_key <- reactive({
+    req(mm_scale_is_articles(), !is.null(input$mm_metric))
+    sub("^article:", "", as.character(input$mm_metric))
+  })
+
+  mm_article_selected_rows <- reactive({
+    req(mm_scale_is_articles())
+    uid <- mm_selected_user(); req(!is.na(uid))
+    key <- mm_article_key()
+    mm_article_df() %>%
+      dplyr::filter(.data$user_id == !!uid, .data$key == !!key) %>%
+      dplyr::left_join(
+        ARTICLE_MEASURES %>%
+          dplyr::select(.data$key, measurement_name=.data$name,
+                        main_label=.data$main_label, range_label=.data$range_label),
+        by="key"
+      ) %>%
+      dplyr::arrange(.data$created_at, .data$score_id)
+  })
+
+  mm_article_selected_row <- reactive({
+    rows <- mm_article_selected_rows()
+    sid <- mm_selected_score_id()
+    dsel <- mm_selected_date()
+    if (!is.null(sid) && nzchar(sid)) {
+      row <- rows %>% dplyr::filter(.data$score_id == !!sid) %>% dplyr::slice_tail(n=1)
+      if (nrow(row)) return(row)
+    }
+    if (!is.na(dsel)) {
+      return(rows %>%
+        dplyr::filter(as.Date(.data$created_at) == !!as.Date(dsel)) %>%
+        dplyr::slice_tail(n=1))
+    }
+    tibble::tibble()
+  })
+
   mm_metric_id <- reactive({
     req(authed(), session_role() == "institution", input$tabs == "Medidas Moove")
     req(!is.null(input$mm_metric))
@@ -4045,6 +4266,25 @@ server <- function(input, output, session) {
   
   mm_group_stats <- reactive({
     req(authed(), session_role() == "institution", input$tabs == "Medidas Moove")
+    if (mm_scale_is_articles()) {
+      key <- mm_article_key()
+      d <- mm_article_df() %>%
+        dplyr::filter(.data$key == !!key) %>%
+        dplyr::group_by(.data$user_id) %>%
+        dplyr::arrange(dplyr::desc(.data$created_at), dplyr::desc(.data$score_id), .by_group=TRUE) %>%
+        dplyr::slice(1) %>%
+        dplyr::ungroup()
+      req(nrow(d) > 0)
+      ug_named <- grouping_user_links() %>%
+        dplyr::filter(.data$user_id %in% !!unique(as.integer(d$user_id))) %>%
+        dplyr::distinct(.data$user_id, .data$group_id, .keep_all = TRUE)
+      return(d %>%
+        dplyr::left_join(ug_named, by = "user_id") %>%
+        dplyr::group_by(.data$group_id, .data$group_name) %>%
+        dplyr::summarise(value = mean(.data$value, na.rm = TRUE),
+                         n = dplyr::n_distinct(.data$user_id), .groups = "drop") %>%
+        dplyr::filter(!is.na(.data$group_name) & .data$group_name != ""))
+    }
     d <- mm_df(); req(nrow(d) > 0)
     mid <- mm_metric_id(); req(!is.na(mid))
     
@@ -4054,20 +4294,36 @@ server <- function(input, output, session) {
       dplyr::filter(.data$user_id %in% !!unique(as.integer(d$user_id))) %>%
       dplyr::distinct(.data$user_id, .data$group_id, .keep_all = TRUE)
 
-    if (!nrow(ug_named)) return(tibble::tibble(group_id = integer(), group_name = character(), value = numeric()))
+    if (!nrow(ug_named)) return(tibble::tibble(group_id = integer(), group_name = character(), value = numeric(), n = integer()))
     
     d %>%
       dplyr::left_join(ug_named, by = "user_id") %>%
       dplyr::group_by(group_id, group_name) %>%
-      dplyr::summarise(value = mean(score, na.rm = TRUE), .groups = "drop") %>%
+      dplyr::summarise(value = mean(score, na.rm = TRUE),
+                       n = dplyr::n_distinct(.data$user_id[is.finite(.data$score)]), .groups = "drop") %>%
       dplyr::filter(!is.na(group_name) & group_name != "")
   })
   
   mm_user_stats <- reactive({
     req(authed(), session_role() == "institution", input$tabs == "Medidas Moove")
-    mid <- mm_metric_id(); req(!is.na(mid))
     gid <- mm_selected_group(); req(!is.na(gid))
-    
+    if (mm_scale_is_articles()) {
+      key <- mm_article_key()
+      d <- mm_article_df() %>% dplyr::filter(.data$key == !!key)
+      req(nrow(d) > 0)
+      ug_users <- grouping_user_links() %>%
+        dplyr::filter(.data$group_id == !!gid) %>%
+        dplyr::transmute(user_id = as.integer(.data$user_id)) %>% dplyr::distinct()
+      nm_df <- get_names_for_users(ug_users$user_id)
+      return(d %>%
+        dplyr::filter(.data$user_id %in% ug_users$user_id) %>%
+        dplyr::group_by(.data$user_id) %>%
+        dplyr::summarise(value=mean(.data$value, na.rm=TRUE),
+                         assessments=dplyr::n(), .groups="drop") %>%
+        dplyr::left_join(nm_df, by = "user_id") %>%
+        dplyr::mutate(name = dplyr::coalesce(.data$name, paste0("user_", .data$user_id)), n = 1L))
+    }
+    mid <- mm_metric_id(); req(!is.na(mid))
     d <- mm_df(); req(nrow(d) > 0)
     d <- d %>% dplyr::filter(.data$measurement_id == !!mid)
     
@@ -4196,6 +4452,26 @@ server <- function(input, output, session) {
   
   mm_download_df <- reactive({
     req(authed(), session_role() == "institution", input$tabs == "Medidas Moove")
+    if (mm_scale_is_articles()) {
+      d <- mm_article_df()
+      if (!nrow(d)) return(tibble::tibble())
+      nm <- get_names_for_users(unique(as.integer(d$user_id))) %>%
+        dplyr::transmute(user_id, Nome=dplyr::coalesce(.data$name, paste0("user_", .data$user_id)))
+      ug_named <- grouping_user_links() %>%
+        dplyr::group_by(.data$user_id) %>%
+        dplyr::summarise(Grupos=paste(sort(unique(.data$group_name[!is.na(.data$group_name) & .data$group_name != ""])), collapse=", "), .groups="drop")
+      details <- vapply(d$secondary, function(x) {
+        if (!length(x)) return(NA_character_)
+        paste(sprintf("%s: %s", names(x), unlist(x)), collapse="; ")
+      }, character(1))
+      return(d %>%
+        dplyr::left_join(nm, by="user_id") %>%
+        dplyr::left_join(ARTICLE_MEASURES %>% dplyr::select(.data$key, Medida=.data$name, Unidade=.data$range_label), by="key") %>%
+        dplyr::left_join(ug_named, by="user_id") %>%
+        dplyr::mutate(Detalhes=details) %>%
+        dplyr::transmute(.data$Nome, .data$Medida, `Pontuação`=round(.data$value, 1), .data$Unidade,
+                         Data=format(as.Date(.data$created_at), "%d/%m/%Y"), .data$Grupos, .data$Detalhes))
+    }
     d <- mm_df()
     if (is.null(d) || !nrow(d)) {
       return(tibble::tibble(
@@ -4501,9 +4777,19 @@ server <- function(input, output, session) {
   output$ui_status_panel <- renderUI({
     if (!isTRUE(authed())) {
       return(
-        div(style="padding:10px; border:1px solid #eee; border-radius:8px; background:#fafafa; margin-bottom:8px;",
-            tags$b("Status"), tags$br(),
-            "Aguardando autenticação…"
+        div(
+          class = "performance-scope-bar",
+          div(
+            class = "scope-identity",
+            div(class = "scope-kicker", "Status"),
+            div(class = "scope-name", "Aguardando autenticação"),
+            div(class = "scope-meta", "Faça login para carregar a instituição e liberar os painéis.")
+          ),
+          div(
+            class = "scope-control",
+            div(class = "scope-kicker", "Escopo de análise"),
+            div(class = "scope-meta", "O agrupamento será liberado após a autenticação institucional.")
+          )
         )
       )
     }
@@ -4511,30 +4797,41 @@ server <- function(input, output, session) {
     if (identical(rl, "institution")) {
       d <- institution_dt()
       inst_name <- tryCatch(as.character(d$institution_name), error = function(e) NA_character_)
-      inst_id   <- tryCatch(as.integer(d$institution_id),   error = function(e) NA_integer_)
-      
-            div(style="padding:10px; border:1px solid #eee; border-radius:8px; background:#fafafa; margin-bottom:8px;",
-          tags$b("Status"), tags$br(),
-          span("Instituição: ", inst_name), tags$br(),
-          tags$div(style = "margin-top:8px;",
-            radioButtons(
-              "grouping_mode",
-              label = "Agrupamento",
-              choices = c("Grupos" = "groups", "Treinadores" = "trainers"),
-              selected = input$grouping_mode %||% "groups",
-              inline = TRUE
-            )
-          )
+      inst_id   <- tryCatch(as.integer(d$institution_id), error = function(e) NA_integer_)
+
+      div(
+        class = "performance-scope-bar",
+        div(
+          class = "scope-identity",
+          div(class = "scope-kicker", "Instituição ativa"),
+          div(class = "scope-name", inst_name),
+          div(class = "scope-meta", paste0("ID institucional: ", inst_id))
+        ),
+        div(
+          class = "scope-control",
+          radioButtons(
+            "grouping_mode",
+            label = "Escopo de análise",
+            choices = c("Grupos" = "groups", "Treinadores" = "trainers"),
+            selected = input$grouping_mode %||% "groups",
+            inline = TRUE
+          ),
+          div(class = "scope-meta", "Esta escolha orienta os painéis de performance, ranking, triagem e Today.")
+        )
       )
     } else {
-      div(style="padding:10px; border:1px solid #eee; border-radius:8px; background:#fafafa; margin-bottom:8px;",
-          tags$b("Status"), tags$br(),
-          span("Perfil detectado: Trainer"), tags$br(),
-          span(style="color:#b00;", "Relatório de trainer virá em micropasso futuro.")
+      div(
+        class = "performance-scope-bar",
+        div(
+          class = "scope-identity",
+          div(class = "scope-kicker", "Status"),
+          div(class = "scope-name", "Perfil Trainer"),
+          div(class = "scope-meta", "Relatório de trainer virá em micropasso futuro.")
+        ),
+        div(class = "scope-control", div(class = "scope-kicker", "Escopo indisponível"))
       )
     }
   })
-  
   # ---- overview -----
   
   output$hc_users_members <- renderHighchart({
@@ -5468,40 +5765,38 @@ server <- function(input, output, session) {
     inst_name <- tryCatch(as.character(institution_dt()$institution_name), error = function(e) "Instituicao")
     selected <- input$ranking_scope %||% "global"
 
-    radioButtons(
-      "ranking_scope",
-      label = "Escopo do ranking:",
-      choices = stats::setNames(c("global", "institution"), c("Global", inst_name)),
-      selected = selected,
-      inline = TRUE
+    div(
+      class = "ranking-shell",
+      div(class = "scope-kicker", "Ranking Moove"),
+      radioButtons(
+        "ranking_scope",
+        label = "Escopo do ranking:",
+        choices = stats::setNames(c("global", "institution"), c("Global", inst_name)),
+        selected = selected,
+        inline = TRUE
+      )
     )
   })
-
   output$ui_rankings_top3 <- renderUI({
     req(authed(), session_role() == "institution", input$tabs == "Rankings")
     df <- ranking_scope_df()
 
     if (is.null(df) || !nrow(df)) {
-      return(div(style = "padding:12px;", "Sem dados para o ranking Moove."))
+      return(div(class = "ranking-shell", "Sem dados para o ranking Moove."))
     }
 
     top3 <- df %>% dplyr::slice_head(n = 3)
 
-    fluidRow(
-      lapply(seq_len(nrow(top3)), function(i) {
-        row <- top3[i, , drop = FALSE]
-        column(
-          width = 4,
-          wellPanel(
-            tags$div(style = "font-size:18px; font-weight:700;", paste0("#", row$rank_display[[1]], " ", row$display_name[[1]])),
-            tags$div(style = "margin-top:6px;", paste0("Neurons: ", scales::comma(row$neurons[[1]], accuracy = 1))),
-            tags$div(style = "font-size:24px; font-weight:700; margin-top:10px;", scales::comma(row$score[[1]], accuracy = 1))
-          )
-        )
-      })
+    div(
+      class = "ranking-shell",
+      div(class = "scope-kicker", "Pódio"),
+      div(class = "ranking-podium",
+        lapply(seq_len(nrow(top3)), function(i) {
+          ranking_podium_card(top3[i, , drop = FALSE], i)
+        })
+      )
     )
   })
-
   output$tbl_rankings <- DT::renderDT({
     req(authed(), session_role() == "institution", input$tabs == "Rankings")
     df <- ranking_scope_df()
@@ -5509,7 +5804,7 @@ server <- function(input, output, session) {
 
     out <- df %>%
       dplyr::transmute(
-        Rank = .data$rank_display,
+        Rank = paste0("#", .data$rank_display),
         Usuario = .data$display_name,
         Neurons = round(.data$neurons),
         Score = round(.data$score)
@@ -5518,10 +5813,20 @@ server <- function(input, output, session) {
     DT::datatable(
       out,
       rownames = FALSE,
-      options = list(pageLength = 50, dom = "tip", ordering = FALSE)
-    )
+      class = "stripe hover compact nowrap",
+      options = list(
+        pageLength = 50,
+        dom = "tip",
+        ordering = FALSE,
+        columnDefs = list(
+          list(className = "dt-center", targets = 0),
+          list(className = "dt-right", targets = c(2, 3))
+        )
+      )
+    ) %>%
+      DT::formatStyle("Rank", fontWeight = "700", color = "#071016") %>%
+      DT::formatStyle("Score", fontWeight = "700", color = "#071016")
   })
-
   output$ui_rankings_minigame_scope <- renderUI({
     req(authed(), session_role() == "institution", input$tabs == "Rankings")
     df <- ranking_minigame_sheet_df()
@@ -6300,15 +6605,22 @@ server <- function(input, output, session) {
   
   output$ui_mm_metric_tabs <- renderUI({
     req(authed(), session_role() == "institution", input$tabs == "Medidas Moove")
-    ms <- mm_available_measures(); req(nrow(ms) > 0)
-    ch <- stats::setNames(as.integer(ms$measurement_id), ms$measurement_name)
+    if (mm_scale_is_articles()) {
+      available <- unique(mm_article_df()$key)
+      ms <- ARTICLE_MEASURES %>% dplyr::filter(.data$key %in% !!available)
+      req(nrow(ms) > 0)
+      ch <- stats::setNames(paste0("article:", ms$key), ms$name)
+    } else {
+      ms <- mm_available_measures(); req(nrow(ms) > 0)
+      ch <- stats::setNames(as.integer(ms$measurement_id), ms$measurement_name)
+    }
     
     tags$div(
       id = "mm_metric_wrap",
       radioButtons(
         "mm_metric", label = NULL, inline = TRUE,
         choices  = ch,
-        selected = as.integer(ch[[1]])
+        selected = unname(ch[[1]])
       )
     )
   })
@@ -6326,6 +6638,104 @@ server <- function(input, output, session) {
     
     req(authed(), session_role() == "institution", input$tabs == "Medidas Moove")
     req(!is.null(input$mm_metric))
+
+    if (mm_scale_is_articles()) {
+      key <- mm_article_key()
+      info <- article_measure_info(key)
+      req(nrow(info) == 1)
+      static_bounds <- switch(key, cfq=c(0,100), psqi=c(0,21), whoqol=c(1,5),
+                              pss=c(0,40), asrs=c(0,72), ipaq=c(0, NA_real_))
+      fmt <- if (info$digits[1] > 0) "{point.y:.1f}" else "{point.y:.0f}"
+
+      if (identical(mm_view_mode(), "groups")) {
+        df <- mm_group_stats() %>%
+          dplyr::mutate(value=as.numeric(.data$value)) %>%
+          dplyr::filter(is.finite(.data$value)) %>%
+          dplyr::arrange(dplyr::desc(.data$value), .data$group_name)
+        total <- nrow(df); pb <- page_bounds(total, mm_page(), PER_PAGE)
+        idx <- if (pb[1] <= pb[2]) seq.int(pb[1], pb[2]) else integer(0)
+        df <- df[idx, , drop=FALSE]
+        avg <- if (nrow(df)) mean(df$value) else NA_real_
+        cols <- if (is.na(info$higher_is_good[1])) rep("#6fa8dc", nrow(df)) else
+          color_by_mean(df$value, avg, high_is_good=info$higher_is_good[1])
+        upper <- static_bounds[2]
+        if (!is.finite(upper)) upper <- max(c(df$value, 1), na.rm=TRUE) * 1.12
+        points <- purrr::pmap(list(df$group_name, df$value, cols, df$n),
+          function(nm,v,col,n) list(name=nm,y=v,color=col,n=n))
+        return(highchart() %>%
+          hc_chart(type="column", inverted=TRUE) %>%
+          hc_title(text=paste0(info$main_label[1], " — por grupo")) %>%
+          hc_subtitle(text="A barra mostra a média; passe o cursor para consultar o n do grupo.") %>%
+          hc_xAxis(type="category", categories=df$group_name) %>%
+          hc_yAxis(min=static_bounds[1], max=upper, title=list(text=info$range_label[1]),
+                   plotLines=list(list(color="#f39c12",width=2,value=avg,zIndex=5))) %>%
+          hc_plotOptions(column=list(dataLabels=bar_datalabels_opts(fmt), cursor="pointer",
+            point=list(events=list(click=JS("function(){Shiny.setInputValue('hc_mm_group_click',{name:this.name},{priority:'event'});}"))))) %>%
+          hc_add_series(name=info$main_label[1],data=points,showInLegend=FALSE,
+                        tooltip=list(pointFormat="<b>Valor:</b> {point.y}<br/><b>n:</b> {point.n}")) %>%
+          hc_exporting(enabled=TRUE))
+      }
+
+      if (identical(mm_view_mode(), "users")) {
+        df <- mm_user_stats() %>%
+          dplyr::mutate(value=as.numeric(.data$value)) %>%
+          dplyr::filter(is.finite(.data$value)) %>%
+          dplyr::arrange(dplyr::desc(.data$value), .data$name)
+        total <- nrow(df); pb <- page_bounds(total, mm_page(), PER_PAGE)
+        idx <- if (pb[1] <= pb[2]) seq.int(pb[1], pb[2]) else integer(0)
+        df <- df[idx, , drop=FALSE]
+        avg <- if (nrow(df)) mean(df$value) else NA_real_
+        cols <- if (is.na(info$higher_is_good[1])) rep("#6fa8dc", nrow(df)) else
+          color_by_mean(df$value, avg, high_is_good=info$higher_is_good[1])
+        upper <- static_bounds[2]
+        if (!is.finite(upper)) upper <- max(c(df$value, 1), na.rm=TRUE) * 1.12
+        points <- purrr::pmap(list(df$name,df$value,cols,df$user_id),
+          function(nm,v,col,uid) list(name=nm,y=v,color=col,uid=uid))
+        return(highchart() %>%
+          hc_chart(type="column",inverted=TRUE) %>%
+          hc_title(text=paste0(info$main_label[1], " — usuários do grupo")) %>%
+          hc_subtitle(text=sprintf("n = %d indivíduos", total)) %>%
+          hc_xAxis(type="category",categories=df$name) %>%
+          hc_yAxis(min=static_bounds[1],max=upper,title=list(text=info$range_label[1]),
+                   plotLines=list(list(color="#f39c12",width=2,value=avg,zIndex=5))) %>%
+          hc_plotOptions(column=list(dataLabels=bar_datalabels_opts(fmt),cursor="pointer",
+            point=list(events=list(click=JS("function(){Shiny.setInputValue('hc_mm_user_click',{uid:this.options.uid,name:this.name},{priority:'event'});}"))))) %>%
+          hc_add_series(name=info$main_label[1],data=points,showInLegend=FALSE) %>%
+          hc_exporting(enabled=TRUE))
+      }
+
+      rows <- mm_article_selected_rows(); req(nrow(rows) > 0)
+      categories <- format(as.POSIXct(rows$created_at), "%d/%m/%Y %H:%M")
+      values <- as.numeric(rows$value)
+      user_mean <- mean(values, na.rm=TRUE)
+      cols <- if (is.na(info$higher_is_good[1])) rep("#6fa8dc", nrow(rows)) else
+        color_by_mean(values, user_mean, high_is_good=info$higher_is_good[1])
+      points <- purrr::pmap(
+        list(values, cols, rows$score_id, categories, rows$created_at),
+        function(value, color, sid, label, created_at) {
+          list(y=value, color=color, sid=sid, name=label,
+               date=format(as.Date(created_at), "%Y-%m-%d"))
+        }
+      )
+      upper <- static_bounds[2]
+      if (!is.finite(upper)) upper <- max(c(values, 1), na.rm=TRUE) * 1.12
+      hc <- highchart() %>%
+        hc_chart(type="column",inverted=TRUE) %>%
+        hc_title(text=paste0(info$main_label[1], " — ", mm_selected_uname() %||% "Usuário")) %>%
+        hc_subtitle(text=paste0("n = ", nrow(rows), " avaliações")) %>%
+        hc_xAxis(type="category",categories=categories) %>%
+        hc_yAxis(min=static_bounds[1],max=upper,title=list(text=info$range_label[1])) %>%
+        hc_plotOptions(column=list(dataLabels=bar_datalabels_opts(fmt),cursor="pointer",
+          point=list(events=list(click=JS("function(){Shiny.setInputValue('hc_mm_user_eval_click',{sid:this.options.sid,date:this.options.date},{priority:'event'});}"))))) %>%
+        hc_add_series(name=info$main_label[1],data=points,showInLegend=FALSE,
+                      tooltip=list(pointFormat="<b>Valor:</b> {point.y}<br/><b>Avaliação:</b> {point.name}"))
+      if (is.finite(user_mean)) {
+        hc <- hc %>% hc_add_series(type="line",name="Média do usuário",
+          data=rep(user_mean,nrow(rows)),color="#e67e22",lineWidth=2,
+          marker=list(enabled=FALSE),enableMouseTracking=FALSE)
+      }
+      return(hc %>% hc_exporting(enabled=TRUE))
+    }
     
     bounds <- c(0, 1000)
     fmt    <- "{point.y:.0f}"
@@ -6349,6 +6759,7 @@ server <- function(input, output, session) {
       highchart() %>%
         hc_chart(type = "column", inverted = TRUE) %>%
         hc_title(text = "Score médio — por grupo") %>%
+        hc_subtitle(text = sprintf("n = %d vínculos individuais nas barras exibidas", sum(df$n, na.rm = TRUE))) %>%
         hc_xAxis(type = "category", categories = df$group_name) %>%
         hc_yAxis(min = rng$min, max = rng$max, title = list(text = NULL),
                  plotLines = list(list(color = "#f39c12", width = 2, value = avg, zIndex = 5))) %>%
@@ -6371,9 +6782,10 @@ server <- function(input, output, session) {
         ) %>%
         hc_add_series(
           name = "Score",
-          data = purrr::pmap(list(df$group_name, df$value, cols),
-                             function(nm, v, c) list(name = nm, y = v, color = c)),
-          showInLegend = FALSE
+          data = purrr::pmap(list(df$group_name, df$value, cols, df$n),
+                             function(nm, v, c, n) list(name = nm, y = v, color = c, n = n)),
+          showInLegend = FALSE,
+          tooltip = list(pointFormat = "<b>Score:</b> {point.y:.0f}<br/><b>n:</b> {point.n}")
         ) %>%
         hc_exporting(enabled = TRUE)
       
@@ -6394,6 +6806,7 @@ server <- function(input, output, session) {
       highchart() %>%
         hc_chart(type = "column", inverted = TRUE) %>%
         hc_title(text = "Score médio — usuários do grupo") %>%
+        hc_subtitle(text = sprintf("n = %d indivíduos", n)) %>%
         hc_xAxis(type = "category", categories = df$name) %>%
         hc_yAxis(min = rng$min, max = rng$max, title = list(text = NULL),
                  plotLines = list(list(color = "#f39c12", width = 2, value = avg, zIndex = 5))) %>%
@@ -6546,7 +6959,7 @@ server <- function(input, output, session) {
     } else if (identical(mm_view_mode(), "users")) {
       u <- mm_user_stats();  total_items <- nrow(u)
     } else if (identical(mm_view_mode(), "user")) {
-      t <- mm_user_ts();     total_items <- nrow(t)
+      total_items <- if (mm_scale_is_articles()) nrow(mm_article_selected_rows()) else nrow(mm_user_ts())
     }
     total_pages <- max(1L, ceiling(total_items / PER_PAGE))
     curr <- clamp(mm_page(), 1L, total_pages); if (curr != mm_page()) mm_page(curr)
@@ -6648,7 +7061,34 @@ server <- function(input, output, session) {
   
   output$ui_mm_detail <- renderUI({
     req(authed(), session_role() == "institution", input$tabs == "Medidas Moove")
-    row <- mm_selected_row(); req(nrow(row) > 0)
+    if (mm_scale_is_articles()) {
+      req(identical(mm_view_mode(), "user"))
+      row <- mm_article_selected_row()
+      if (!nrow(row)) return(NULL)
+      values <- row$secondary[[1]]
+      if (!length(values)) return(NULL)
+      format_secondary <- function(value) {
+        if (is.character(value)) return(value)
+        if (!is.finite(as.numeric(value))) return("Não calculável")
+        format(round(as.numeric(value), 1), decimal.mark=",", trim=TRUE)
+      }
+      return(div(
+        style="margin-top:14px; border-top:1px solid #ddd; padding-top:12px;",
+        h4(paste0("Resultados secundários — ", row$measurement_name[1])),
+        div(format(as.POSIXct(row$created_at[1]), "%d/%m/%Y %H:%M"),
+            style="font-size:12px; color:#666; margin-bottom:10px;"),
+        div(
+          style="display:grid; grid-template-columns:repeat(auto-fit,minmax(190px,1fr)); gap:8px;",
+          lapply(names(values), function(label) {
+            div(style="border:1px solid #ddd; border-radius:6px; padding:10px 12px; background:#fff;",
+                div(label, style="font-size:12px; color:#666;"),
+                div(format_secondary(values[[label]]), style="font-size:20px; font-weight:600;"))
+          })
+        )
+      ))
+    } else {
+      row <- mm_selected_row(); req(nrow(row) > 0)
+    }
     
     dstr <- tryCatch(format(as.Date(row$date[1]), "%Y-%m-%d"), error = function(...) "—")
     
@@ -6693,6 +7133,25 @@ server <- function(input, output, session) {
     )
   })
   
+  output$ui_mm_article_method <- renderUI({
+    req(authed(), session_role() == "institution", input$tabs == "Medidas Moove")
+    req(mm_scale_is_articles())
+    key <- mm_article_key()
+    txt <- ARTICLE_MEASURE_TEXTS[[key]]
+    req(!is.null(txt))
+    div(
+      style="margin-top:24px; padding:16px 0; border-top:1px solid #ccc; line-height:1.55;",
+      h4("Regra de cálculo"),
+      tags$b(txt$title),
+      tags$p(txt$calculation),
+tags$p(txt$domains, style="color:#555;"),
+      tags$b("Referências"),
+      tags$ul(lapply(ARTICLE_MEASURE_REFERENCES[[key]], function(ref) {
+        tags$li(tags$a(ref$label, href=ref$url, target="_blank", rel="noopener noreferrer"))
+      }))
+    )
+  })
+
   output$hc_mm_det_score_circ <- renderHighchart({
     row <- mm_selected_row()
     hc_circular_bar(
@@ -6947,34 +7406,117 @@ server <- function(input, output, session) {
   
   # ---- today -----
 
-  output$ui_today_group <- renderUI({
+  today_unit_sheet_df <- reactive({
     req(authed(), session_role() == "institution")
-    entities <- grouping_entities()
-    choices <- c("Todos" = "ALL")
-    if (nrow(entities) > 0) {
-      entity_choices <- entities$id
-      names(entity_choices) <- entities$name
-      choices <- c(choices, entity_choices)
-    }
-
-    selectInput(
-      "today_group",
-      label = paste0(grouping_label(grouping_mode(), plural = FALSE, title_case = TRUE), ":"),
-      choices = choices,
-      selected = "ALL",
-      width = "100%"
+    today_refresh_tick()
+    read_triage_threshold_sheet(
+      TRIAGE_SHEET_ID,
+      grouping_mode = "trainers",
+      institution_email = triage_institution_email()
     )
   })
 
+  today_unit_trainers <- reactive({
+    today_unit_sheet_df() %>%
+      dplyr::filter(!is.na(.data$unit), nzchar(trimws(.data$unit))) %>%
+      dplyr::filter(!is.na(.data$trainer_id), !is.na(.data$trainer), nzchar(trimws(.data$trainer))) %>%
+      dplyr::transmute(
+        trainer_id = as.integer(.data$trainer_id),
+        trainer_name = as.character(.data$trainer),
+        unit = as.character(.data$unit)
+      ) %>%
+      dplyr::distinct(.data$trainer_id, .keep_all = TRUE) %>%
+      dplyr::arrange(.data$unit, .data$trainer_name)
+  })
+
+  today_unit_user_links <- reactive({
+    trainers <- today_unit_trainers()
+    if (!nrow(trainers)) {
+      return(tibble::tibble(user_id = integer(), unit = character()))
+    }
+
+    get_legal_entity_trainers_users(trainers$trainer_id) %>%
+      dplyr::inner_join(trainers, by = "trainer_id") %>%
+      dplyr::transmute(user_id = as.integer(.data$user_id), unit = as.character(.data$unit)) %>%
+      dplyr::filter(!is.na(.data$user_id), !is.na(.data$unit), .data$unit != "") %>%
+      dplyr::distinct()
+  })
+
+  today_bucket_mode <- reactive({
+    if (!nrow(today_unit_user_links())) return("grouping")
+    mode <- input$today_bucket_mode %||% "grouping"
+    if (identical(mode, "units")) "units" else "grouping"
+  })
+
+  output$ui_today_bucket_mode <- renderUI({
+    req(authed(), session_role() == "institution")
+    if (!nrow(today_unit_user_links())) return(NULL)
+
+    div(
+      style = "display:flex; justify-content:center; margin: 0 0 12px 0;",
+      radioButtons(
+        "today_bucket_mode",
+        label = NULL,
+        choices = c("Grupos/Treinadores" = "grouping", "Unidades" = "units"),
+        selected = input$today_bucket_mode %||% "grouping",
+        inline = TRUE
+      )
+    )
+  })
+
+  output$ui_today_group <- renderUI({
+    req(authed(), session_role() == "institution")
+    choices <- c("Todos" = "ALL")
+
+    if (identical(today_bucket_mode(), "units")) {
+      units <- today_unit_user_links() %>%
+        dplyr::filter(!is.na(.data$unit), nzchar(trimws(.data$unit))) %>%
+        dplyr::distinct(.data$unit) %>%
+        dplyr::arrange(.data$unit) %>%
+        dplyr::pull(.data$unit)
+      if (length(units)) choices <- c(choices, stats::setNames(units, units))
+      label <- "Unidade:"
+    } else {
+      entities <- grouping_entities()
+      if (nrow(entities) > 0) {
+        entity_choices <- entities$id
+        names(entity_choices) <- entities$name
+        choices <- c(choices, entity_choices)
+      }
+      label <- paste0(grouping_label(grouping_mode(), plural = FALSE, title_case = TRUE), ":")
+    }
+
+    selected <- input$today_group %||% "ALL"
+    if (!selected %in% unname(choices)) selected <- "ALL"
+
+    selectInput(
+      "today_group",
+      label = label,
+      choices = choices,
+      selected = selected,
+      width = "100%"
+    )
+  })
   today_collection_name <- reactive({
-    if (identical(input$today_collection_mode %||% "full", "light")) "today_light_summarys" else "today_summarys"
+    if (identical(input$today_collection_mode %||% "light", "light")) "today_light_summarys" else "today_summarys"
   })
 
   today_users_df <- reactive({
     req(authed(), session_role() == "institution")
-    inst_id <- req(selected_institution_id())
     choice <- input$today_group %||% "ALL"
-    uids <- unique(as.integer(get_user_ids_for_institution_or_grouping(inst_id, choice, grouping_mode())))
+
+    if (identical(today_bucket_mode(), "units")) {
+      links <- today_unit_user_links()
+      if (!identical(choice, "ALL")) {
+        links <- links %>% dplyr::filter(.data$unit == choice)
+      }
+      uids <- unique(as.integer(links$user_id))
+    } else {
+      inst_id <- req(selected_institution_id())
+      uids <- unique(as.integer(get_user_ids_for_institution_or_grouping(inst_id, choice, grouping_mode())))
+    }
+
+    uids <- uids[!is.na(uids)]
     names_df <- get_names_for_users(uids)
     tibble::tibble(user_id = uids) %>%
       dplyr::left_join(names_df, by = "user_id") %>%
@@ -6998,22 +7540,103 @@ server <- function(input, output, session) {
     prepare_today_summaries(raw, users_df)
   })
 
+  today_nonuse_df <- reactive({
+    req(authed(), session_role() == "institution")
+    users <- today_users_df()
+    if (!nrow(users)) {
+      return(tibble::tibble(user_id = integer(), user_name = character(), total_measures = integer(), last_measure = as.Date(character()), last_measure_label = character()))
+    }
+
+    days <- suppressWarnings(as.integer(input$today_nonuse_days %||% 7L))
+    if (is.na(days) || days < 1L) days <- 7L
+    if (days > 90L) days <- 90L
+    cutoff <- Sys.Date() - (days - 1L)
+
+    summary_df <- today_base_df() %>%
+      dplyr::filter(!is.na(.data$user_id)) %>%
+      dplyr::group_by(.data$user_id) %>%
+      dplyr::summarise(
+        total_measures = dplyr::n(),
+        last_measure = suppressWarnings(max(.data$date, na.rm = TRUE)),
+        recent_measures = sum(!is.na(.data$date) & .data$date >= cutoff),
+        .groups = "drop"
+      ) %>%
+      dplyr::mutate(
+        last_measure = dplyr::if_else(is.infinite(.data$last_measure), as.Date(NA), as.Date(.data$last_measure))
+      )
+
+    out <- users %>%
+      dplyr::left_join(summary_df, by = "user_id") %>%
+      dplyr::mutate(
+        total_measures = dplyr::coalesce(as.integer(.data$total_measures), 0L),
+        recent_measures = dplyr::coalesce(as.integer(.data$recent_measures), 0L),
+        last_measure_label = dplyr::if_else(is.na(.data$last_measure), "nunca monitorou", format(.data$last_measure, "%d/%m/%Y"))
+      ) %>%
+      dplyr::filter(.data$recent_measures == 0L)
+
+    order_mode <- input$today_nonuse_order %||% "name"
+    if (identical(order_mode, "count")) {
+      out <- out %>% dplyr::arrange(.data$total_measures, .data$user_name)
+    } else if (identical(order_mode, "last")) {
+      out <- out %>% dplyr::arrange(dplyr::coalesce(.data$last_measure, as.Date("1900-01-01")), .data$user_name)
+    } else {
+      out <- out %>% dplyr::arrange(.data$user_name)
+    }
+
+    out %>% dplyr::select(.data$user_id, .data$user_name, .data$total_measures, .data$last_measure, .data$last_measure_label)
+  })
+
+  output$ui_today_nonuse_status <- renderUI({
+    req(input$today_usage_mode == "nonuse")
+    df <- today_nonuse_df()
+    days <- suppressWarnings(as.integer(input$today_nonuse_days %||% 7L))
+    if (is.na(days) || days < 1L) days <- 7L
+    div(
+      style = "font-weight:650; color:#263238; margin-bottom:12px; text-align:center;",
+      sprintf("%s usuários sem monitoramento nos últimos %s dias.", format(nrow(df), big.mark = ".", decimal.mark = ","), days)
+    )
+  })
+
+  output$tbl_today_nonuse <- DT::renderDT({
+    req(input$today_usage_mode == "nonuse")
+    df <- today_nonuse_df()
+    out <- df %>%
+      dplyr::transmute(
+        `Usuário` = .data$user_name,
+        `Medidas` = .data$total_measures,
+        `Última medida` = .data$last_measure_label
+      )
+
+    DT::datatable(
+      out,
+      rownames = FALSE,
+      class = "stripe hover compact nowrap",
+      options = list(
+        pageLength = 25,
+        dom = "tip",
+        ordering = FALSE,
+        columnDefs = list(list(className = "dt-right", targets = 1))
+      )
+    ) %>%
+      DT::formatStyle("Usuário", fontWeight = "650", color = "#071016") %>%
+      DT::formatStyle("Medidas", fontWeight = "650", color = "#263238")
+  })
   today_date_defaults <- reactive({
     df <- today_base_df()
     dates <- sort(unique(df$date[!is.na(df$date)]))
     if (!length(dates)) return(list(start = Sys.Date(), end = Sys.Date()))
-    start <- if (length(dates) > 20) dates[length(dates) - 19] else min(dates)
-    list(start = start, end = max(dates))
+    last_date <- max(dates)
+    list(start = last_date, end = last_date)
   })
 
   output$ui_today_date_start <- renderUI({
     defaults <- today_date_defaults()
-    dateInput("today_date_start", "Data inicial:", value = input$today_date_start %||% defaults$start)
+    dateInput("today_date_start", "Data inicial:", value = defaults$start)
   })
 
   output$ui_today_date_end <- renderUI({
     defaults <- today_date_defaults()
-    dateInput("today_date_end", "Data final:", value = input$today_date_end %||% defaults$end)
+    dateInput("today_date_end", "Data final:", value = defaults$end)
   })
 
   today_filtered_df <- reactive({
@@ -7082,9 +7705,9 @@ server <- function(input, output, session) {
   output$ui_today_status <- renderUI({
     df <- today_filtered_df()
     if (!nrow(df)) {
-      return(div(style = "font-weight:600; color:#777;", "Nenhum dado do Today encontrado para o escopo selecionado."))
+      return(div(style = "font-weight:600; color:#777;", "Nenhum dado do Monitoramento encontrado para o escopo selecionado."))
     }
-    div(style = "font-weight:600; color:#555;", sprintf("%s registros do Today no período selecionado.", format(nrow(df), big.mark = ".", decimal.mark = ",")))
+    div(style = "font-weight:600; color:#555;", sprintf("%s registros do Monitoramento no período selecionado.", format(nrow(df), big.mark = ".", decimal.mark = ",")))
   })
 
   output$ui_today_download_data <- renderUI({
@@ -7092,70 +7715,228 @@ server <- function(input, output, session) {
     downloadButton("today_download_data", "Download dos dados")
   })
 
-  output$today_all_users_board <- renderPlotly({
-    req(authed(), session_role() == "institution", input$tabs == today_tab_label())
+  today_is_single_day <- reactive({
+    defaults <- today_date_defaults()
+    start_date <- as.Date(input$today_date_start %||% defaults$start)
+    end_date <- as.Date(input$today_date_end %||% defaults$end)
+    !is.na(start_date) && !is.na(end_date) && identical(start_date, end_date)
+  })
+
+  today_status_color <- function(x) {
+    dplyr::case_when(
+      x == "green" ~ "#32D583",
+      x == "yellow" ~ "#FACC15",
+      x == "red" ~ "#EF4444",
+      x == "gray" ~ "#A8B3B8",
+      TRUE ~ "#FFFFFF"
+    )
+  }
+
+  today_daily_air_df <- reactive({
     df <- today_filtered_df()
+    base_users <- if (isTRUE(input$today_show_absent)) {
+      today_users_df()
+    } else if (nrow(df)) {
+      dplyr::distinct(df, .data$user_id, .data$user_name)
+    } else {
+      tibble::tibble(user_id = integer(), user_name = character())
+    }
+    if (!nrow(base_users)) return(tibble::tibble())
+
+    latest <- df %>%
+      dplyr::arrange(.data$user_name, .data$created_at) %>%
+      dplyr::group_by(.data$user_id, .data$user_name) %>%
+      dplyr::slice_tail(n = 1) %>%
+      dplyr::ungroup() %>%
+      dplyr::transmute(
+        user_id = .data$user_id,
+        hour = .data$hour,
+        Atencao = .data$c.inattention,
+        Controle = .data$c.impulsiveness,
+        Rapidez = .data$c.velocity
+      )
+
+    user_levels <- rev(sort(unique(base_users$user_name)))
+
+    base_users %>%
+      dplyr::left_join(latest, by = "user_id") %>%
+      dplyr::mutate(user_name_plot = factor(.data$user_name, levels = user_levels)) %>%
+      tidyr::pivot_longer(cols = c("Atencao", "Controle", "Rapidez"), names_to = "metric", values_to = "status") %>%
+      dplyr::mutate(
+        metric_label = factor(.data$metric, levels = c("Atencao", "Controle", "Rapidez"), labels = c("Atenção", "Controle de impulsividade", "Rapidez")),
+        letter = dplyr::recode(.data$metric, Atencao = "A", Controle = "I", Rapidez = "R"),
+        has_record = !is.na(.data$hour),
+        status_clean = dplyr::coalesce(.data$status, "white"),
+        fill_color = today_status_color(.data$status_clean),
+        status_label = factor(
+          .data$status_clean,
+          levels = c("gray", "green", "white", "yellow", "red"),
+          labels = c("linha de base", "acima do padrão", "dentro do padrão", "abaixo do padrão", "muito abaixo do padrão")
+        ),
+        text_color = dplyr::if_else(.data$status_clean %in% c("green", "yellow", "gray", "white"), "#071016", "#FFFFFF"),
+        tooltip = paste0(.data$user_name, "<br>", .data$metric_label, "<br>", "Hora: ", .data$hour)
+      )
+  })
+
+  today_usage_board_height <- reactive({
+    if (isTRUE(today_is_single_day())) {
+      df <- today_daily_air_df()
+      n_users <- length(unique(df$user_name))
+      return(if (n_users > 0) max(680, n_users * 58) else 600)
+    }
+
+    df <- today_filtered_df()
+    base_users <- if (isTRUE(input$today_show_absent)) {
+      today_users_df()
+    } else if (nrow(df)) {
+      dplyr::distinct(df, .data$user_id, .data$user_name)
+    } else {
+      tibble::tibble(user_id = integer(), user_name = character())
+    }
+
+    n_users <- length(unique(base_users$user_name))
+    if (n_users > 0) max(640, n_users * 46) else 600
+  })
+  output$today_daily_air <- renderPlotly({
+    req(authed(), session_role() == "institution", input$tabs == today_tab_label())
+    df <- today_daily_air_df()
     req(nrow(df) > 0)
 
-    pos <- dplyr::distinct(df, .data$user_name, .data$user_name_plot) %>%
-      dplyr::mutate(y = as.numeric(.data$user_name_plot))
+    df_points <- df %>% dplyr::filter(.data$has_record)
 
-    n_users <- length(unique(df$user_name))
-    today_board_height(if (n_users > 15) n_users * 40 else 600)
-
-    p <- ggplot(df, ggplot2::aes(x = .data$date_str, y = .data$user_name_plot, key = .data$user_id)) +
+    p <- ggplot(df, ggplot2::aes(x = .data$metric_label, y = .data$user_name_plot, key = .data$user_id)) +
       ggplot2::geom_segment(
         data = dplyr::distinct(df, .data$user_name_plot),
         ggplot2::aes(y = .data$user_name_plot, yend = .data$user_name_plot, x = -Inf, xend = Inf),
-        inherit.aes = FALSE, color = "gray30", linetype = "dotted", size = 0.3
+        inherit.aes = FALSE, color = "#E8EDEE", linetype = "dotted", size = 0.3
       ) +
-      ggplot2::geom_hline(data = pos, ggplot2::aes(yintercept = .data$y), inherit.aes = FALSE, color = "gray30", linetype = "dotted", size = 0.3) +
       ggplot2::geom_point(
+        data = df_points,
+        ggplot2::aes(fill = .data$status_label, text = .data$tooltip),
+        color = "#263238", shape = 21, size = 11, stroke = 0.8, show.legend = TRUE
+      ) +
+      ggplot2::geom_text(data = df_points, ggplot2::aes(label = .data$letter), color = df_points$text_color, size = 5.2, fontface = "bold", show.legend = FALSE) +
+      ggplot2::scale_fill_manual(
+        name = NULL,
+        values = c(
+          "linha de base" = "#A8B3B8",
+          "acima do padrão" = "#32D583",
+          "dentro do padrão" = "#FFFFFF",
+          "abaixo do padrão" = "#FACC15",
+          "muito abaixo do padrão" = "#EF4444"
+        ),
+        drop = FALSE
+      ) +
+      ggplot2::guides(fill = ggplot2::guide_legend(override.aes = list(shape = 21, size = 5, color = "#263238"))) +
+      ggplot2::theme_minimal(base_size = 12) +
+      ggplot2::labs(x = NULL, y = NULL, title = "Monitoramento diário") +
+      ggplot2::theme(
+        plot.title = ggplot2::element_text(color = "#071016", face = "bold", hjust = 0.5),
+        axis.text.x = ggplot2::element_text(color = "#263238", face = "bold", size = 12),
+        axis.text.y = ggplot2::element_text(color = "#263238", size = 11),
+        panel.background = ggplot2::element_rect(fill = "#FFFFFF", color = "#FFFFFF"),
+        plot.background = ggplot2::element_rect(fill = "#FFFFFF", color = "#FFFFFF"),
+        panel.grid.major.x = ggplot2::element_blank(),
+        panel.grid.minor = ggplot2::element_blank(),
+        panel.grid.major.y = ggplot2::element_line(color = "#EEF2F3", linetype = "dotted"),
+        legend.position = "bottom",
+        legend.text = ggplot2::element_text(color = "#263238")
+      )
+
+    plotly::ggplotly(p, tooltip = "text", source = "today_board") %>%
+      plotly::event_register("plotly_click") %>%
+      plotly::layout(
+        paper_bgcolor = "#FFFFFF",
+        plot_bgcolor = "#FFFFFF",
+        legend = list(orientation = "h", x = 0.5, y = -0.18, xanchor = "center", yanchor = "top", font = list(size = 13, color = "#263238"))
+      )
+  })
+
+  output$today_all_users_board <- renderPlotly({
+    req(authed(), session_role() == "institution", input$tabs == today_tab_label())
+    df <- today_filtered_df()
+    req(nrow(df) > 0 || isTRUE(input$today_show_absent))
+
+    base_users <- if (isTRUE(input$today_show_absent)) {
+      today_users_df()
+    } else {
+      dplyr::distinct(df, .data$user_id, .data$user_name)
+    }
+    req(nrow(base_users) > 0)
+    user_levels <- rev(sort(unique(base_users$user_name)))
+    df <- df %>% dplyr::mutate(user_name_plot = factor(.data$user_name, levels = user_levels))
+    pos <- base_users %>%
+      dplyr::mutate(user_name_plot = factor(.data$user_name, levels = user_levels), y = as.numeric(.data$user_name_plot))
+
+    p <- ggplot(pos, ggplot2::aes(y = .data$user_name_plot, key = .data$user_id)) +
+      ggplot2::geom_segment(
+        ggplot2::aes(y = .data$user_name_plot, yend = .data$user_name_plot, x = -Inf, xend = Inf),
+        inherit.aes = FALSE, color = "#E8EDEE", linetype = "dotted", size = 0.3
+      ) +
+      ggplot2::geom_point(
+        data = df,
         ggplot2::aes(
+          x = .data$date_str,
+          y = .data$user_name_plot,
+          key = .data$user_id,
           fill = .data$fill_label,
           text = paste0(.data$user_name, "<br>", .data$date_str, "<br>Clique para ter detalhes!")
         ),
-        color = "white", shape = 21, size = 8, stroke = 0.7, show.legend = FALSE
+        color = "#263238", shape = 21, size = 8, stroke = 0.7, show.legend = FALSE
       ) +
-      ggplot2::geom_text(ggplot2::aes(label = .data$hour), color = df$text_color, size = 3, show.legend = FALSE) +
+      ggplot2::geom_text(data = df, ggplot2::aes(x = .data$date_str, y = .data$user_name_plot, label = .data$hour), color = df$text_color, size = 3, show.legend = FALSE) +
       ggplot2::scale_fill_manual(
         name = "",
         values = c(
-          "incompleto" = "#272B30",
-          "linha de base" = "gray",
-          "acima do padrão" = "green",
-          "dentro do padrão" = "white",
-          "abaixo do padrão" = "yellow",
-          "muito abaixo do padrão" = "red"
+          "incompleto" = "#E5E7EB",
+          "linha de base" = "#A8B3B8",
+          "acima do padrão" = "#32D583",
+          "dentro do padrão" = "#FFFFFF",
+          "abaixo do padrão" = "#FACC15",
+          "muito abaixo do padrão" = "#EF4444"
         )
       ) +
       ggplot2::theme_minimal(base_size = 12) +
       ggplot2::labs(x = "", y = "") +
       ggplot2::scale_x_discrete() +
       ggplot2::theme(
-        axis.text.x = ggplot2::element_text(angle = 45, hjust = 1, color = "white"),
-        axis.text.y = ggplot2::element_text(color = "white", size = 12),
-        panel.background = ggplot2::element_rect(fill = "#272B30", color = "#272B30"),
-        plot.background = ggplot2::element_rect(fill = "#272B30", color = "#272B30"),
+        axis.text.x = ggplot2::element_text(angle = 45, hjust = 1, color = "#263238"),
+        axis.text.y = ggplot2::element_text(color = "#263238", size = 12),
+        panel.background = ggplot2::element_rect(fill = "#FFFFFF", color = "#FFFFFF"),
+        plot.background = ggplot2::element_rect(fill = "#FFFFFF", color = "#FFFFFF"),
         panel.grid = ggplot2::element_blank()
       )
 
     plotly::ggplotly(p, tooltip = "text", source = "today_board") %>%
       plotly::event_register("plotly_click") %>%
       plotly::layout(
-        legend = list(orientation = "h", x = 0.5, y = -0.3, xanchor = "center", yanchor = "top", font = list(size = 15, color = "white"))
+        paper_bgcolor = "#FFFFFF",
+        plot_bgcolor = "#FFFFFF",
+        legend = list(orientation = "h", x = 0.5, y = -0.3, xanchor = "center", yanchor = "top", font = list(size = 15, color = "#263238"))
       )
   })
 
   output$ui_today_all_users_board <- renderUI({
-    req(nrow(today_filtered_df()) > 0)
-    plotlyOutput("today_all_users_board", height = paste0(today_board_height(), "px"))
+    req(nrow(today_filtered_df()) > 0 || isTRUE(input$today_show_absent))
+    if (isTRUE(today_is_single_day())) {
+      plotlyOutput("today_daily_air", height = paste0(today_usage_board_height(), "px"))
+    } else {
+      plotlyOutput("today_all_users_board", height = paste0(today_usage_board_height(), "px"))
+    }
   })
-
   today_user_df <- reactive({
     uid <- today_selected_user_id()
     req(!is.na(uid))
-    df <- today_filtered_df() %>% dplyr::filter(.data$user_id == uid) %>% dplyr::arrange(.data$created_at)
+    defaults <- today_date_defaults()
+    start_date <- as.Date(input$today_date_start %||% defaults$start)
+    end_date <- as.Date(input$today_date_end %||% defaults$end)
+    df_all <- today_base_df() %>% dplyr::filter(.data$user_id == uid) %>% dplyr::arrange(.data$created_at)
+    req(nrow(df_all) > 0)
+
+    df <- df_all %>% dplyr::filter(.data$date >= start_date, .data$date <= end_date)
+    if (isTRUE(today_is_single_day())) {
+      df <- df_all %>% dplyr::slice_tail(n = 10)
+    }
     req(nrow(df) > 0)
 
     s_1 <- 0.125; s_2 <- 0.25; s_3 <- 0.75
@@ -7240,25 +8021,25 @@ server <- function(input, output, session) {
     req(nrow(df) > 0)
 
     p <- ggplot(df, ggplot2::aes(x = .data$session, y = .data$value, text = .data$plotytext)) +
-      ggplot2::geom_hline(yintercept = c(2.1, 1, 0, -1, -1.75, -2.1), color = c("white", "green", "gray", "yellow", "red", "white"), size = c(.02, 1, .5, 1, 1, .02)) +
+      ggplot2::geom_hline(yintercept = c(2.1, 1, 0, -1, -1.75, -2.1), color = c("#CBD5D8", "#32D583", "#A8B3B8", "#FACC15", "#EF4444", "#CBD5D8"), size = c(.02, 1, .5, 1, 1, .02)) +
       ggplot2::geom_line(ggplot2::aes(color = .data$variable, group = .data$variable), size = 1.2) +
-      ggplot2::geom_point(color = df$s_color, size = 3) +
+      ggplot2::geom_point(color = "#263238", fill = today_status_color(df$s_color), shape = 21, stroke = 0.8, size = 3.4) +
       ggplot2::scale_x_continuous(breaks = df$session, labels = df$date_gr) +
       ggplot2::ylim(-2.2, 2.2) +
       ggplot2::theme_minimal(base_size = 12) +
       ggplot2::labs(x = NULL, y = NULL, color = NULL, fill = NULL) +
       ggplot2::theme(
         legend.position = "bottom",
-        plot.background = ggplot2::element_rect(fill = "#272B30", color = "#272B30"),
-        panel.background = ggplot2::element_rect(fill = "#272B30", color = "#272B30"),
+        plot.background = ggplot2::element_rect(fill = "#FFFFFF", color = "#FFFFFF"),
+        panel.background = ggplot2::element_rect(fill = "#FFFFFF", color = "#FFFFFF"),
         panel.grid = ggplot2::element_blank(),
-        axis.text.x = ggplot2::element_text(angle = 45, hjust = 1, color = "white"),
+        axis.text.x = ggplot2::element_text(angle = 45, hjust = 1, color = "#263238"),
         axis.text.y = ggplot2::element_blank(),
-        legend.text = ggplot2::element_text(color = "white")
+        legend.text = ggplot2::element_text(color = "#263238")
       )
 
     plotly::ggplotly(p, tooltip = "text") %>%
-      plotly::layout(legend = list(orientation = "h", x = 0.5, y = -0.5, xanchor = "center", yanchor = "top", font = list(size = 15)))
+      plotly::layout(paper_bgcolor = "#FFFFFF", plot_bgcolor = "#FFFFFF", legend = list(orientation = "h", x = 0.5, y = -0.5, xanchor = "center", yanchor = "top", font = list(size = 15, color = "#263238")))
   })
 
   output$today_download_data <- downloadHandler(
@@ -7278,10 +8059,10 @@ server <- function(input, output, session) {
   observeEvent(input$today_refresh_data, {
     today_selected_user_id(NA_integer_)
     today_refresh_tick(isolate(today_refresh_tick()) + 1L)
-    showNotification("Dados do Today atualizados.", type = "message", duration = 3)
+    showNotification("Dados do Monitoramento atualizados.", type = "message", duration = 3)
   }, ignoreInit = TRUE)
 
-  observeEvent(list(input$today_group, input$today_collection_mode, grouping_mode()), {
+  observeEvent(list(input$today_group, input$today_bucket_mode, input$today_collection_mode, grouping_mode()), {
     today_selected_user_id(NA_integer_)
   }, ignoreInit = TRUE)
 
@@ -7329,14 +8110,14 @@ server <- function(input, output, session) {
     if(is_local){
       email <- "contato@sensorialsports.com"
       pass  <- "senso"
-      email <- "bruno.bember@sesisp.org.br"
-      pass  <- "sesivolei1"
-      email <- "luana@cityvida.com.br"
-      pass  <- "CityVida07"
-      email <- "sensorial.botafogo@safbfr.com.br"
-      pass  <- "8hGyx5"
-      email <- "comercialfc@sensorial.life"
-      pass  <- "Cc8888"
+      # email <- "bruno.bember@sesisp.org.br"
+      # pass  <- "sesivolei1"
+      # email <- "luana@cityvida.com.br"
+      # pass  <- "CityVida07"
+      # email <- "sensorial.botafogo@safbfr.com.br"
+      # pass  <- "8hGyx5"
+      # email <- "comercialfc@sensorial.life"
+      # pass  <- "Cc8888"
       # email <- "deise.superaonline@franquiasupera.com.br"
       # pass  <- "Cc8888"
     }else{
@@ -7798,6 +8579,16 @@ server <- function(input, output, session) {
 
   
   
+  observeEvent(input$mm_scale_mode, {
+    mm_view_mode("groups")
+    mm_selected_group(NA_integer_)
+    mm_selected_user(NA_integer_)
+    mm_selected_uname(NA_character_)
+    mm_selected_score_id(NULL)
+    mm_selected_date(as.Date(NA))
+    mm_page(1L)
+  }, ignoreInit = TRUE)
+
   observeEvent(input$hc_mm_group_click, {
     req(authed(), session_role() == "institution", input$tabs == "Medidas Moove")
     clicked_name <- input$hc_mm_group_click$name
@@ -7859,6 +8650,7 @@ server <- function(input, output, session) {
     }
   }, ignoreInit = TRUE)
   
+
   observeEvent(input$hc_mm_user_eval_click, {
     req(authed(), session_role() == "institution", input$tabs == "Medidas Moove")
     sid  <- input$hc_mm_user_eval_click$sid
