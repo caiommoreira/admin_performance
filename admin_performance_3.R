@@ -34,6 +34,7 @@ directory <- tryCatch(paste0(dirname(rstudioapi::getSourceEditorContext()$path),
 
 source(paste0(directory, "Env.Data.R"))
 source(paste0(directory, "measurement_article_scores.R"))
+source(paste0(directory, "neurospace_article_scores.R"))
 
 config <- if (is_debug) getHomEnvConfig() else getProdEnvConfig()
 
@@ -4196,7 +4197,7 @@ server <- function(input, output, session) {
     uids <- scope_user_ids()
     key <- paste(inst_id, choice, paste(sort(unique(uids)), collapse = ","), sep = "|")
     if (!exists(key, envir = mm_article_cache, inherits = FALSE)) {
-      assign(key, get_article_measure_scores(pool, uids), envir = mm_article_cache)
+      assign(key, get_article_measure_scores(pool, uids, mongo_url = config[6]), envir = mm_article_cache)
     }
     get(key, envir = mm_article_cache, inherits = FALSE)
   })
@@ -6606,8 +6607,7 @@ server <- function(input, output, session) {
   output$ui_mm_metric_tabs <- renderUI({
     req(authed(), session_role() == "institution", input$tabs == "Medidas Moove")
     if (mm_scale_is_articles()) {
-      available <- unique(mm_article_df()$key)
-      ms <- ARTICLE_MEASURES %>% dplyr::filter(.data$key %in% !!available)
+      ms <- ARTICLE_MEASURES
       req(nrow(ms) > 0)
       ch <- stats::setNames(paste0("article:", ms$key), ms$name)
     } else {
@@ -6643,7 +6643,7 @@ server <- function(input, output, session) {
       key <- mm_article_key()
       info <- article_measure_info(key)
       req(nrow(info) == 1)
-      static_bounds <- switch(key, cfq=c(0,100), psqi=c(0,21), whoqol=c(1,5),
+      static_bounds <- switch(key, neurospace_3dmot=c(0, NA_real_), cfq=c(0,100), psqi=c(0,21), whoqol=c(1,5),
                               pss=c(0,40), asrs=c(0,72), ipaq=c(0, NA_real_))
       fmt <- if (info$digits[1] > 0) "{point.y:.1f}" else "{point.y:.0f}"
 
