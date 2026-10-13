@@ -35,6 +35,7 @@ directory <- tryCatch(paste0(dirname(rstudioapi::getSourceEditorContext()$path),
 source(paste0(directory, "Env.Data.R"))
 source(paste0(directory, "measurement_article_scores.R"))
 source(paste0(directory, "neurospace_article_scores.R"))
+source(paste0(directory, "cognitive_article_scores.R"))
 
 config <- if (is_debug) getHomEnvConfig() else getProdEnvConfig()
 
@@ -641,7 +642,7 @@ today_tab_panel <- function() {
       radioButtons(
         "today_usage_mode",
         label = NULL,
-        choices = c("Utilização" = "usage", "Não-Utilização" = "nonuse"),
+        choices = c("Utilização" = "usage", "Não-Utilização" = "nonuse", "Relatório" = "report"),
         selected = "usage",
         inline = TRUE
       )
@@ -703,6 +704,35 @@ today_tab_panel <- function() {
         br(),
         uiOutput("ui_today_nonuse_status"),
         div(class = "today-nonuse-table", DTOutput("tbl_today_nonuse"))
+      )
+    ),
+    conditionalPanel(
+      condition = "input.today_usage_mode == 'report'",
+      br(),
+      tags$h4("Sessões realizadas", style = "text-align:center; font-weight:700;"),
+      fluidRow(align = "center", DTOutput("tbl_today_report_monthly", width = "33%")),
+      br(),
+      div(
+        class = "today-nonuse-panel",
+        uiOutput("ui_today_report_summary"),
+        br(),
+        tags$h4("Medidas por usuário", style = "font-weight:700;"),
+        div(class = "today-nonuse-table", DTOutput("tbl_today_report_users")),
+        br(),
+        tags$h4("Dia da semana x horário das medidas", style = "font-weight:700;"),
+        highchartOutput("hc_today_report_heatmap", height = "420px"),
+        br(),
+        tags$h4("Distribuição temporal das sessões", style = "font-weight:700;"),
+        fluidRow(
+          align = "center",
+          column(3),
+          column(3, uiOutput("ui_today_report_daily_start")),
+          column(3, uiOutput("ui_today_report_daily_end")),
+          column(3)
+        ),
+        highchartOutput("hc_today_report_daily", height = "380px"),
+        br(),
+        uiOutput("ui_today_report_metric_alerts")
       )
     )
   )
@@ -2198,6 +2228,19 @@ ui <- fluidPage(
                     "Avaliações",
                     br(),
                     div(
+                      style = "display:flex; justify-content:center; margin: 8px 0 12px 0;",
+                      radioButtons(
+                        "eval_scale_mode",
+                        label = NULL,
+                        inline = TRUE,
+                        choices = c(
+                          "Pontuação Moove" = "moove",
+                          "Escala dos artigos" = "articles"
+                        ),
+                        selected = "moove"
+                      )
+                    ),
+                    div(
                       style = "display:flex; justify-content:center; margin: 8px 0 16px 0;",
                       downloadButton("download_evals_xlsx", "Baixar resultados (XLSX)", class = "btn btn-primary")
                     ),
@@ -2205,18 +2248,25 @@ ui <- fluidPage(
                     fluidRow(align = "center",DTOutput("tbl_mg_monthly_evals",width = "50%")),
                     br(),
                     br(),
-                    fluidRow(
-                      column(9, uiOutput("ui_eval_metric_tabs")),
-                      column(3, div(style="text-align:right; margin-top:6px;", uiOutput("ui_eval_back")))
+                    conditionalPanel(
+                      condition = "input.eval_scale_mode == 'moove'",
+                      fluidRow(
+                        column(9, uiOutput("ui_eval_metric_tabs")),
+                        column(3, div(style="text-align:right; margin-top:6px;", uiOutput("ui_eval_back")))
+                      ),
+                      highchartOutput("hc_evals", height = "650px"),
+                      div(
+                        style = "display:flex; justify-content:center; align-items:center; gap:12px; margin: 10px 0 4px 0;",
+                        uiOutput("ui_eval_pager")
+                      ),
+                      br(),
+                      uiOutput("ui_eval_detail"),
+                      br()
                     ),
-                    highchartOutput("hc_evals", height = "650px"),
-                    div(
-                      style = "display:flex; justify-content:center; align-items:center; gap:12px; margin: 10px 0 4px 0;",
-                      uiOutput("ui_eval_pager")  # <- prev | página X/Y | next
-                    ),
-                    br(),
-                    uiOutput("ui_eval_detail"),
-                    br()
+                    conditionalPanel(
+                      condition = "input.eval_scale_mode == 'articles'",
+                      uiOutput("ui_eval_article_rules")
+                    )
                   ),
                   # ---- minigames -----
                   
@@ -2672,6 +2722,61 @@ server <- function(input, output, session) {
   
   EVAL_CACHE_PREFIX <- "EVAL"
   
+  eval_scale_is_articles <- reactive({
+    identical(input$eval_scale_mode %||% "moove", "articles")
+  })
+
+  eval_article_cache <- new.env(parent = emptyenv())
+
+  eval_article_scores <- reactive({
+    req(authed(), session_role() == "institution", input$tabs == "Avaliações")
+    inst_id <- req(selected_institution_id())
+    uids <- scope_user_ids()
+    key <- paste(inst_id, grouping_scope_key(), paste(sort(unique(uids)), collapse = ","), sep = "|")
+    if (!exists(key, envir = eval_article_cache, inherits = FALSE)) {
+      scores <- get_cognitive_article_scores(pool, config, uids)
+      if (nrow(scores)) {
+        names_df <- get_names_for_users(unique(scores$user_id))
+        groups_df <- grouping_user_links() %>%
+          dplyr::filter(.data$user_id %in% !!unique(scores$user_id)) %>%
+          dplyr::group_by(.data$user_id) %>%
+          dplyr::summarise(
+            groups = paste(sort(unique(.data$group_name[!is.na(.data$group_name)])), collapse = ", "),
+            .groups = "drop"
+          )
+        scores <- scores %>%
+          dplyr::left_join(names_df, by = "user_id") %>%
+          dplyr::left_join(groups_df, by = "user_id") %>%
+          dplyr::mutate(
+            name = dplyr::coalesce(.data$name, paste0("user_", .data$user_id)),
+            groups = dplyr::coalesce(.data$groups, "")
+          )
+      }
+      assign(key, scores, envir = eval_article_cache)
+    }
+    get(key, envir = eval_article_cache, inherits = FALSE)
+  })
+
+  eval_article_for_download <- reactive({
+    scores <- eval_article_scores()
+    if (nrow(scores)) {
+      out <- scores %>%
+        dplyr::select(
+          Nome = .data$name,
+          Grupo = .data$groups,
+          dplyr::everything(),
+          -.data$user_id
+        )
+    } else {
+      out <- dplyr::bind_cols(
+        tibble::tibble(Nome = character(), Grupo = character()),
+        scores %>% dplyr::select(-.data$user_id)
+      )
+    }
+    names(out) <- cognitive_article_export_labels(names(out))
+    out
+  })
+
   eval_cache_key <- function(suffix = NULL, inst_id = NULL, gid = NULL, uid = NULL, metric = NULL, extra = NULL) {
     cache_key(
       prefix   = paste0(EVAL_CACHE_PREFIX, "|", suffix %||% ""),
@@ -4879,26 +4984,34 @@ server <- function(input, output, session) {
   
   output$tbl_mg_monthly_evals <- DT::renderDT({
     req(authed(), session_role() == "institution")
-    df <- evals_joined()
+    df <- if (eval_scale_is_articles()) eval_article_scores() else evals_joined()
+
+    if (!nrow(df)) {
+      return(DT::datatable(
+        tibble::tibble(`Mês` = character()),
+        rownames = FALSE,
+        options = list(paging = FALSE, searching = FALSE, ordering = FALSE, dom = "t")
+      ))
+    }
+
     df$date <- as.Date(df$evaluation_date)
-    
     out <- df %>%
       dplyr::mutate(
-        year      = lubridate::year(date),
-        month_num = lubridate::month(date),
-        month_lab = lubridate::month(date, label = TRUE, abbr = TRUE)
+        year      = lubridate::year(.data$date),
+        month_num = lubridate::month(.data$date),
+        month_lab = lubridate::month(.data$date, label = TRUE, abbr = TRUE)
       ) %>%
-      dplyr::count(year, month_num, month_lab, name = "minigames") %>%
+      dplyr::count(.data$year, .data$month_num, .data$month_lab, name = "evaluations") %>%
       tidyr::pivot_wider(
-        names_from  = year,
-        values_from = minigames,
+        names_from  = .data$year,
+        values_from = .data$evaluations,
         values_fill = 0
       ) %>%
-      dplyr::arrange(month_num) %>%
-      dplyr::select(`Mês` = month_lab, dplyr::everything(), -month_num)
-    
+      dplyr::arrange(.data$month_num) %>%
+      dplyr::select(`Mês` = .data$month_lab, dplyr::everything(), -.data$month_num)
+
     out <- monthly_with_totals(out, month_label = "Mês")
-    
+
     DT::datatable(
       out,
       rownames = FALSE,
@@ -4910,7 +5023,6 @@ server <- function(input, output, session) {
       )
     )
   })
-  
   output$tbl_evals <- DT::renderDT({
     req(evals_joined())
     
@@ -5424,6 +5536,24 @@ server <- function(input, output, session) {
     hc_polar_rose(cats, vals, title_txt = "Estado — intensidade (%)", max_pct = 100)
   })
   
+  output$ui_eval_article_rules <- renderUI({
+    req(authed(), session_role() == "institution", input$tabs == "Avaliações")
+    req(eval_scale_is_articles())
+    tags$div(
+      style = "margin-top:24px; padding-top:18px; border-top:1px solid #ddd;",
+      tags$h3("Regras de cálculo"),
+      tags$ul(lapply(COGNITIVE_ARTICLE_RULES, tags$li)),
+      tags$h4("Referências"),
+      tags$ul(lapply(COGNITIVE_ARTICLE_REFERENCES, function(reference) {
+        tags$li(tags$a(
+          reference$label,
+          href = reference$url,
+          target = "_blank",
+          rel = "noopener noreferrer"
+        ))
+      }))
+    )
+  })
   output$download_evals_xlsx <- downloadHandler(filename = function() {
       d <- institution_dt()
       inst <- tryCatch(as.character(d$institution_name), error = function(e) "instituicao")
@@ -5431,7 +5561,7 @@ server <- function(input, output, session) {
               gsub("[^A-Za-z0-9_-]", "_", inst),
               format(Sys.time(), "%Y%m%d-%H%M"))
     },content = function(file) {
-      df <- evals_for_download()
+      df <- if (eval_scale_is_articles()) eval_article_for_download() else evals_for_download()
       # garante ordem de colunas como especificado acima:
       openxlsx::write.xlsx(df, file, na = "")
       # se preferir base R:
@@ -7621,6 +7751,256 @@ tags$p(txt$domains, style="color:#555;"),
       DT::formatStyle("Usuário", fontWeight = "650", color = "#071016") %>%
       DT::formatStyle("Medidas", fontWeight = "650", color = "#263238")
   })
+  # ---- today: relatório -----
+  output$tbl_today_report_monthly <- DT::renderDT({
+    req(input$today_usage_mode == "report")
+    df <- today_base_df() %>% dplyr::filter(!is.na(.data$date))
+
+    if (!nrow(df)) {
+      return(DT::datatable(
+        tibble::tibble(`Mês` = character()),
+        rownames = FALSE,
+        options = list(paging = FALSE, searching = FALSE, ordering = FALSE, dom = "t")
+      ))
+    }
+
+    out <- df %>%
+      dplyr::mutate(
+        year      = lubridate::year(.data$date),
+        month_num = lubridate::month(.data$date),
+        month_lab = lubridate::month(.data$date, label = TRUE, abbr = TRUE)
+      ) %>%
+      dplyr::count(.data$year, .data$month_num, .data$month_lab, name = "sessions") %>%
+      dplyr::arrange(.data$year) %>%
+      tidyr::pivot_wider(
+        names_from  = .data$year,
+        values_from = .data$sessions,
+        values_fill = 0
+      ) %>%
+      dplyr::arrange(.data$month_num) %>%
+      dplyr::select(`Mês` = .data$month_lab, dplyr::everything(), -.data$month_num)
+
+    out <- monthly_with_totals(out, month_label = "Mês")
+
+    DT::datatable(
+      out,
+      rownames = FALSE,
+      options = list(paging = FALSE, searching = FALSE, ordering = FALSE, dom = "t")
+    )
+  })
+
+  today_report_df <- reactive({
+    today_base_df() %>% dplyr::filter(!is.na(.data$date))
+  })
+
+  today_fmt_int <- function(x) format(x, big.mark = ".", decimal.mark = ",")
+  today_fmt_pct <- function(n, d) if (d > 0) paste0(format(round(100 * n / d, 1), decimal.mark = ","), "%") else "-"
+
+  output$ui_today_report_summary <- renderUI({
+    req(input$today_usage_mode == "report")
+    df <- today_report_df()
+    n_reg <- nrow(today_users_df())
+    n_users <- dplyr::n_distinct(df$user_id)
+    n_sess <- nrow(df)
+    alert_cols <- c("c.velocity", "c.impulsiveness", "c.inattention")
+    has_color <- function(col) {
+      if (!n_sess) return(logical())
+      rowSums(sapply(alert_cols, function(cn) df[[cn]] %in% col), na.rm = TRUE) > 0
+    }
+    n_yellow <- sum(has_color("yellow"))
+    n_red <- sum(has_color("red"))
+
+    tags$div(
+      style = "font-size:15px; line-height:1.8; color:#263238;",
+      tags$h4("Relatório de Monitoramento", style = "font-weight:700;"),
+      tags$p(tags$b("Número de usuários: "), sprintf("%s (de %s cadastrados no grupo)", today_fmt_int(n_users), today_fmt_int(n_reg))),
+      tags$p(tags$b("Número total de sessões: "), today_fmt_int(n_sess)),
+      tags$p(tags$b("Sessões com ao menos um alerta amarelo: "), sprintf("%s (%s)", today_fmt_int(n_yellow), today_fmt_pct(n_yellow, n_sess))),
+      tags$p(tags$b("Sessões com ao menos um alerta vermelho: "), sprintf("%s (%s)", today_fmt_int(n_red), today_fmt_pct(n_red, n_sess)))
+    )
+  })
+
+  output$tbl_today_report_users <- DT::renderDT({
+    req(input$today_usage_mode == "report")
+    summary_df <- today_report_df() %>%
+      dplyr::group_by(.data$user_id) %>%
+      dplyr::summarise(total_measures = dplyr::n(), last_measure = max(.data$date), .groups = "drop")
+
+    out <- today_users_df() %>%
+      dplyr::left_join(summary_df, by = "user_id") %>%
+      dplyr::mutate(
+        total_measures = dplyr::coalesce(as.integer(.data$total_measures), 0L),
+        last_measure_label = dplyr::if_else(is.na(.data$last_measure), "nunca monitorou", format(.data$last_measure, "%d/%m/%Y"))
+      ) %>%
+      dplyr::arrange(dplyr::desc(.data$total_measures), .data$user_name) %>%
+      dplyr::transmute(
+        `Usuário` = .data$user_name,
+        `Medidas` = .data$total_measures,
+        `Última medida` = .data$last_measure_label
+      )
+
+    DT::datatable(
+      out,
+      rownames = FALSE,
+      class = "stripe hover compact nowrap",
+      options = list(pageLength = 25, dom = "tip", ordering = FALSE,
+                     columnDefs = list(list(className = "dt-right", targets = 1)))
+    ) %>%
+      DT::formatStyle("Usuário", fontWeight = "650", color = "#071016") %>%
+      DT::formatStyle("Medidas", fontWeight = "650", color = "#263238")
+  })
+
+  output$hc_today_report_heatmap <- renderHighchart({
+    req(input$today_usage_mode == "report")
+    df <- today_report_df() %>% dplyr::filter(!is.na(.data$hour))
+    days_lab <- c("Seg", "Ter", "Qua", "Qui", "Sex", "Sáb", "Dom")
+    hours <- 0:23
+
+    counts <- df %>%
+      dplyr::mutate(wd = lubridate::wday(.data$date, week_start = 1)) %>%
+      dplyr::count(.data$wd, .data$hour, name = "n")
+    grid <- tidyr::expand_grid(wd = 1:7, hour = hours) %>%
+      dplyr::left_join(counts, by = c("wd", "hour")) %>%
+      dplyr::mutate(n = dplyr::coalesce(.data$n, 0L))
+
+    data_list <- purrr::pmap(
+      list(grid$hour, grid$wd, grid$n),
+      function(h, w, n) list(x = h, y = w - 1, value = n)
+    )
+
+    highchart() %>%
+      hc_chart(type = "heatmap") %>%
+      hc_xAxis(categories = sprintf("%02dh", hours), title = list(text = "Horário")) %>%
+      hc_yAxis(categories = days_lab, title = list(text = NULL), reversed = TRUE) %>%
+      hc_colorAxis(min = 0, minColor = "#FFFFFF", maxColor = "#32D583") %>%
+      hc_add_series(
+        name = "Medidas", data = data_list, borderWidth = 1, borderColor = "#E2E8E8",
+        dataLabels = list(enabled = TRUE, style = list(fontSize = "9px", textOutline = "none"),
+                          formatter = JS("function(){ return this.point.value > 0 ? this.point.value : ''; }"))
+      ) %>%
+      hc_tooltip(formatter = JS(sprintf(
+        "function(){ var d = %s; return d[this.point.y] + ' ' + this.series.xAxis.categories[this.point.x] + ': <b>' + this.point.value + '</b> medidas'; }",
+        jsonlite::toJSON(days_lab)
+      ))) %>%
+      hc_legend(enabled = TRUE, align = "right", layout = "vertical", verticalAlign = "middle")
+  })
+
+  today_report_daily_defaults <- reactive({
+    dates <- today_report_df()$date
+    last_date <- if (length(dates)) max(dates) else Sys.Date()
+    list(start = last_date - 90, end = last_date)
+  })
+
+  output$ui_today_report_daily_start <- renderUI({
+    d <- today_report_daily_defaults()
+    dateInput("today_report_daily_start", "Data inicial:", value = d$start, format = "dd/mm/yyyy", language = "pt-BR")
+  })
+
+  output$ui_today_report_daily_end <- renderUI({
+    d <- today_report_daily_defaults()
+    dateInput("today_report_daily_end", "Data final:", value = d$end, format = "dd/mm/yyyy", language = "pt-BR")
+  })
+
+  output$hc_today_report_daily <- renderHighchart({
+    req(input$today_usage_mode == "report")
+    d <- today_report_daily_defaults()
+    start_date <- as.Date(input$today_report_daily_start %||% d$start)
+    end_date <- as.Date(input$today_report_daily_end %||% d$end)
+    if (is.na(start_date)) start_date <- d$start
+    if (is.na(end_date)) end_date <- d$end
+    if (start_date > end_date) { tmp <- start_date; start_date <- end_date; end_date <- tmp }
+
+    dates_all <- seq(start_date, end_date, by = "day")
+    date_cats <- format(dates_all, "%d/%m/%y")
+    wd_all <- c("Seg", "Ter", "Qua", "Qui", "Sex", "Sáb", "Dom")[lubridate::wday(dates_all, week_start = 1)]
+
+    # hierarquia: não concluída > linha de base > vermelho > amarelo > verde > branco
+    color_levels <- tibble::tibble(
+      key   = c("black", "gray", "red", "yellow", "green", "white"),
+      label = c("Não concluída", "Linha de base", "Vermelho", "Amarelo", "Verde", "Branco"),
+      fill  = c("#000000", "#B0B7BB", "#E53935", "#FDD835", "#32D583", "#FFFFFF"),
+      ord   = 1:6
+    )
+
+    sess <- today_report_df() %>%
+      dplyr::filter(.data$date >= start_date, .data$date <= end_date) %>%
+      dplyr::mutate(
+        key = dplyr::case_when(
+          .data$conclusion == 0 | is.na(.data$board_color) ~ "black",
+          .data$board_color == "gray"   ~ "gray",
+          .data$board_color == "red"    ~ "red",
+          .data$board_color == "yellow" ~ "yellow",
+          .data$board_color == "green"  ~ "green",
+          TRUE ~ "white"
+        )
+      ) %>%
+      dplyr::left_join(color_levels, by = "key") %>%
+      dplyr::arrange(.data$date, .data$ord, .data$created_at) %>%
+      dplyr::group_by(.data$date) %>%
+      dplyr::mutate(y = dplyr::row_number(), n_day = dplyr::n()) %>%
+      dplyr::ungroup() %>%
+      dplyr::mutate(x = match(.data$date, dates_all) - 1L)
+
+    max_y <- max(c(sess$y, 1L))
+    n_days <- length(dates_all)
+    radius <- max(2, min(7, floor(300 / max_y / 2.4), floor(900 / n_days / 2.4)))
+
+    hc <- highchart() %>%
+      hc_chart(type = "scatter") %>%
+      hc_xAxis(categories = date_cats, min = 0, max = n_days - 1, title = list(text = NULL),
+               labels = list(rotation = -45, style = list(fontSize = "10px"))) %>%
+      hc_yAxis(title = list(text = "Sessões"), allowDecimals = FALSE, min = 0, max = max_y + 0.5) %>%
+      hc_plotOptions(scatter = list(marker = list(symbol = "circle", radius = radius, lineWidth = 1, lineColor = "#9AA5AA"))) %>%
+      hc_tooltip(formatter = JS(sprintf(
+        "function(){ var wd = %s; return '<b>' + this.point.name + '</b><br>' + wd[this.point.x] + ' ' + this.series.xAxis.categories[this.point.x] + ' ' + this.point.hora + '<br>' + this.series.name + '<br>Sessões no dia: ' + this.point.n_day; }",
+        jsonlite::toJSON(wd_all)
+      ))) %>%
+      hc_legend(enabled = TRUE)
+
+    for (i in seq_len(nrow(color_levels))) {
+      lv <- color_levels[i, ]
+      pts <- sess %>% dplyr::filter(.data$key == lv$key)
+      hc <- hc %>% hc_add_series(
+        name = lv$label,
+        color = lv$fill,
+        marker = list(fillColor = lv$fill),
+        data = purrr::pmap(
+          list(pts$x, pts$y, pts$user_name, pts$hour_complete, pts$n_day),
+          function(x, y, nm, h, nd) list(x = x, y = y, name = nm, hora = h, n_day = nd)
+        )
+      )
+    }
+    hc
+  })
+
+  output$ui_today_report_metric_alerts <- renderUI({
+    req(input$today_usage_mode == "report")
+    df <- today_report_df()
+    metrics <- c("Rapidez" = "c.velocity", "Atenção" = "c.inattention", "Impulsividade" = "c.impulsiveness")
+
+    items <- lapply(names(metrics), function(lbl) {
+      v <- df[[metrics[[lbl]]]]
+      v <- v[!is.na(v) & v != "gray"]
+      total <- length(v)
+      n_y <- sum(v == "yellow"); n_r <- sum(v == "red"); n_yr <- n_y + n_r
+      tags$p(
+        tags$b(paste0(lbl, ": ")),
+        sprintf("%s de %s classificações em alerta (%s) — amarelos: %s (%s), vermelhos: %s (%s)",
+                today_fmt_int(n_yr), today_fmt_int(total), today_fmt_pct(n_yr, total),
+                today_fmt_int(n_y), today_fmt_pct(n_y, total),
+                today_fmt_int(n_r), today_fmt_pct(n_r, total))
+      )
+    })
+
+    tags$div(
+      style = "font-size:15px; line-height:1.8; color:#263238;",
+      tags$h4("Alertas por capacidade", style = "font-weight:700;"),
+      items,
+      tags$p(style = "font-size:12px; color:#6B7A80;",
+             "Base: sessões concluídas a partir da 8ª sessão de cada usuário (classificações cinza e incompletas excluídas).")
+    )
+  })
+
   today_date_defaults <- reactive({
     df <- today_base_df()
     dates <- sort(unique(df$date[!is.na(df$date)]))
@@ -8108,18 +8488,20 @@ tags$p(txt$domains, style="color:#555;"),
   observeEvent(input$login_confirm, {
     
     if(is_local){
-      email <- "contato@sensorialsports.com"
-      pass  <- "senso"
+      # email <- "contato@sensorialsports.com"
+      # pass  <- "senso"
       # email <- "bruno.bember@sesisp.org.br"
       # pass  <- "sesivolei1"
       # email <- "luana@cityvida.com.br"
       # pass  <- "CityVida07"
       # email <- "sensorial.botafogo@safbfr.com.br"
       # pass  <- "8hGyx5"
-      # email <- "comercialfc@sensorial.life"
-      # pass  <- "Cc8888"
+      email <- "comercialfc@sensorial.life"
+      pass  <- "Cc0000"
       # email <- "deise.superaonline@franquiasupera.com.br"
       # pass  <- "Cc8888"
+      # email <- "marcelaccarolina@gmail.com"
+      # pass  <- "Tcc2026"
     }else{
       email <- tolower(trimws(input$login_email %||% ""))
       pass  <- input$login_pass %||% ""
@@ -8265,6 +8647,7 @@ tags$p(txt$domains, style="color:#555;"),
   
   observeEvent(list(authed(), session_role(), selected_institution_id()), {
     cache_clear(EVAL_CACHE_PREFIX)
+    rm(list = ls(envir = eval_article_cache), envir = eval_article_cache)
   }, ignoreInit = TRUE)
   
   observeEvent(authed(), {
@@ -8281,6 +8664,15 @@ tags$p(txt$domains, style="color:#555;"),
   
   # ---- evals -----
   
+  observeEvent(input$eval_scale_mode, {
+    eval_view_mode("groups")
+    eval_selected_group(NA_integer_)
+    eval_selected_user(NA_integer_)
+    eval_selected_uname(NA_character_)
+    eval_selected_score_id(NA_character_)
+    eval_selected_date(as.Date(NA))
+    eval_page(1L)
+  }, ignoreInit = TRUE)
   observeEvent(input$hc_eval_group_click, {
     req(authed(), session_role() == "institution", input$tabs == "Avaliações")
     clicked_name <- input$hc_eval_group_click$name
